@@ -61,31 +61,29 @@ def iniciar_banco():
 
 
 # --- FUNÇÃO AUXILIAR: GERAR E ENVIAR ÁUDIO DE RESPOSTA ---
-async def enviar_resposta_em_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, texto_resposta: str):
+async def enviar_resposta_em_audio(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, texto_resposta: str
+):
+  caminho_mp3 = 'resposta.mp3'
   try:
-    caminho_resposta_mp3 = 'resposta.mp3'
-    caminho_resposta_ogg = 'resposta.ogg'
-
-    # Converte o texto da IA em fala
+    # Gera o arquivo de voz em MP3
     tts = gTTS(text=texto_resposta, lang='pt', tld='com.br')
-    tts.save(caminho_resposta_mp3)
+    tts.save(caminho_mp3)
 
-    # Converte MP3 para OGG (formato oficial de nota de voz do Telegram)
-    audio = AudioSegment.from_mp3(caminho_resposta_mp3)
-    audio.export(caminho_resposta_ogg, format='ogg', codec='libopus')
-
-    # Envia a nota de voz no Telegram
-    with open(caminho_resposta_ogg, 'rb') as voice_file:
-      await context.bot.send_voice(chat_id=update.effective_chat.id, voice=voice_file)
-
-    # Limpa arquivos de áudio temporários
-    if os.path.exists(caminho_resposta_mp3):
-      os.remove(caminho_resposta_mp3)
-    if os.path.exists(caminho_resposta_ogg):
-      os.remove(caminho_resposta_ogg)
+    # Envia o arquivo de áudio diretamente para o chat do Telegram
+    with open(caminho_mp3, 'rb') as audio_file:
+      await context.bot.send_audio(
+          chat_id=update.effective_chat.id,
+          audio=audio_file,
+          title='Alerta de Segurança',
+      )
 
   except Exception as e:
-    logging.error(f'Erro ao gerar ou enviar áudio de resposta: {e}')
+    logging.error(f'Erro ao gerar/enviar resposta em audio: {e}')
+
+  finally:
+    if os.path.exists(caminho_mp3):
+      os.remove(caminho_mp3)
 
 
 # --- 3. PROCESSAMENTO INTELIGENTE COM IA (GROQ / LLAMA 3) ---
@@ -142,7 +140,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
   msg = (
       '🚨 *Bot de Mapeamento de Risco com Resposta em Voz*\n\n'
       '🎙️ *Como cadastrar por Áudio:* Envie um áudio com o local e o risco!\n'
-      ' Exemplo: *"Atenção na Rocha Farias no Bairro da Grama, área de risco 3 a partir das 6 da tarde."*\n\n'
+      ' Exemplo: *"Atenção na Rocha Farias no Bairro da Grama, área de risco 3'
+      ' a partir das 6 da tarde."*\n\n'
       'Comandos por texto:\n'
       '🔹 `/consultar [bairro ou rua]`\n'
       '🔹 `/listar` - Exibe os últimos alertas'
@@ -181,7 +180,7 @@ async def consultar(update: Update, context: ContextTypes.DEFAULT_TYPE):
   for item in resultados:
     bairro, rua, risco, horario, detalhes = item
     resposta += (
-        f'⚠️ *Risco Nível {risco}*\n'
+        f'⚠️️ *Risco Nível {risco}*\n'
         f'📍 *Bairro:* {bairro}\n'
         f'🛣️ *Local/Rua:* {rua}\n'
         f'⏰ *Horário Crítico:* {horario}\n'
@@ -250,7 +249,11 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         texto_transcrito
     )
 
-    if not bairro or bairro.lower() in ['não informado', 'nao informado', 'none']:
+    if not bairro or bairro.lower() in [
+        'não informado',
+        'nao informado',
+        'none',
+    ]:
       bairro = 'Bairro Identificado no Relato'
 
     if not rua or rua.lower() in ['não informado', 'nao informado', 'none']:
