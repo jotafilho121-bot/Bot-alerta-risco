@@ -1,6 +1,6 @@
-python-telegram-bot
-gunicorn
-flask
-SpeechRecognition
-pydub
+python-telegram-bot==20.7
 groq
+pydub
+SpeechRecognition
+Flask
+gTTS
