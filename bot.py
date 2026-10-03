@@ -15,7 +15,7 @@ from telegram.ext import (
     filters,
 )
 
-# --- 1. MINI SERVIDOR WEB (Manter Render Ativo de Graça) ---
+# --- 1. MINI SERVIDOR WEB (Manter Render Ativo) ---
 app = Flask('')
 
 
@@ -51,6 +51,7 @@ def iniciar_banco():
             bairro TEXT NOT NULL,
             rua TEXT NOT NULL,
             risco INTEGER NOT NULL,
+            horario_critico TEXT,
             detalhes TEXT
         )
     ''')
@@ -60,33 +61,42 @@ def iniciar_banco():
 
 # --- 3. PROCESSAMENTO INTELIGENTE COM IA (GROQ / LLAMA 3) ---
 def extrair_dados_com_ia(texto_transcrito):
-  # Instanciação Lazy: Lê a variável de ambiente somente no momento da chamada da função
   groq_api_key = os.environ.get('GROQ_API_KEY')
 
   if not groq_api_key:
     logging.error('ERRO: A variável GROQ_API_KEY não foi encontrada.')
-    return None, None, None, None
+    return None, None, None, None, None
 
   client_groq = Groq(api_key=groq_api_key)
 
   prompt = f"""
-    Você é um assistente especialista em analisar relatos de segurança pública e entregas na Baixada Fluminense.
-    Analise o texto abaixo dito por um entregador e extraia as informações de local e risco.
+    Você é um assistente especialista em analisar relatos de segurança e logística de entregas na Baixada Fluminense.
+    Analise o texto dito pelo entregador e extraia as informações de localização, nível de risco e restrições de horário.
 
     Texto falado: "{texto_transcrito}"
 
-    Retorne Apenas no formato exato separado por barras verticais "|":
-    BAIRRO | RUA | RISCO | DETALHES
+    Retorne APENAS no formato exato separado por barras verticais "|":
+    BAIRRO | RUA | RISCO | HORARIO_CRITICO | DETALHES
 
-    Regras de Risco:
-    - Risco 1: Baixo (iluminação ruim, movimento suspeito leve)
-    - Risco 2: Médio (histórico de assaltos, furtos, atenção)
-    - Risco 3: Alto (área de risco máximo, grupo armado, troca de tiros, assalto a moto frequente)
+    Regras de Interpretação:
+    1. BAIRRO: Identifique o bairro ou região (Ex: Jardim Geneciano, Grama, Anbaí). Se não disser, use "Não informado".
+    2. RUA:
+       - Se o relato se referir ao bairro como um todo (Ex: "o bairro todo tá perigoso", "no Geneciano inteiro"), coloque "Todo o Bairro / Vias de Acesso".
+       - Se citar uma rua/avenida específica (Ex: Av. Nazaré, Rua Rocha Farias), coloque o nome da rua.
+       - Se não citar rua nem indicar o bairro todo, use "Não informado".
+    3. RISCO:
+       - Nível 1 (Baixo): Iluminação ruim, atenção leve.
+       - Nível 2 (Médio): Furtos, histórico de assalto, atenção moderada.
+       - Nível 3 (Alto): Área vermelha, presença de grupo armado, risco elevado de assalto a moto, restrição severa de circulação.
+    4. HORARIO_CRITICO: Extraia qualquer menção a janelas de horário ou períodos do dia (Ex: "Após 17h", "À noite", "Qualquer horário", "Após 21h"). Se não citar, use "Dia e Noite".
+    5. DETALHES: Resuma em uma frase curta os principais alertas (Ex: "Atenção reforçada após o pôr do sol", "Guerra de facções / risco de assalto a moto", "Exige atenção total nas vias de acesso").
 
-    Exemplo de Saída:
-    Grama | Rua Rocha Farias | 3 | Atuação de grupo armado e risco de assalto
-    
-    Se não identificar o bairro ou rua no texto, use "Não informado".
+    Exemplo 1 (Bairro Todo):
+    Jardim Geneciano | Todo o Bairro / Vias de Acesso | 3 | Após 17h | Risco alto de assalto e movimentação armada nas vias internas à noite.
+
+    Exemplo 2 (Rua Específica):
+    Grama | Rua Rocha Farias | 3 | À noite | Ponto crítico de assalto a motociclistas.
+
     Responda APENAS a linha formatada com as barras verticais.
     """
 
@@ -99,24 +109,26 @@ def extrair_dados_com_ia(texto_transcrito):
     resultado = resposta.choices[0].message.content.strip()
     partes = [p.strip() for p in resultado.split('|')]
 
-    if len(partes) == 4:
-      return partes[0], partes[1], partes[2], partes[3]
+    if len(partes) == 5:
+      return partes[0], partes[1], partes[2], partes[3], partes[4]
   except Exception as e:
     logging.error(f'Erro na chamada da API Groq: {e}')
 
-  return None, None, None, None
+  return None, None, None, None, None
 
 
 # --- 4. COMANDOS DO TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
   msg = (
-      '🚨 *Bot de Mapeamento de Risco (Com IA Ativa)*\n\n'
-      '🎙️ *Como cadastrar por Áudio:* Mandar um áudio falando normalmente!\n'
-      ' Exemplo: *"Atenção aqui na Rua Rocha Farias no Bairro da Grama, área'
-      ' com os cara armado, risco alto de assalto."*\n\n'
+      '🚨 *Bot de Mapeamento de Risco (Baixada Fluminense)*\n\n'
+      '🎙️ *Como cadastrar por Áudio:* Grave um áudio falando naturalmente!\n'
+      ' Exemplo 1: *"Atenção rapaziada, o bairro do Geneciano todo tá'
+      ' perigoso, depois das 5 da tarde o risco de assalto é alto."*\n'
+      ' Exemplo 2: *"Cuidado na Av. Nazaré à noite, ponto crítico de assalto'
+      ' a moto."*\n\n'
       'Comandos por texto:\n'
       '🔹 `/consultar [nome da rua ou bairro]`\n'
-      '🔹 `/listar` - Exibe os últimos cadastros'
+      '🔹 `/listar` - Exibe os últimos alertas'
   )
   await update.message.reply_text(msg, parse_mode='Markdown')
 
@@ -131,9 +143,11 @@ async def consultar(update: Update, context: ContextTypes.DEFAULT_TYPE):
   termo = ' '.join(context.args)
   conn = sqlite3.connect('banco_risco.db')
   cursor = conn.cursor()
+
+  # Busca por bairro ou rua
   cursor.execute(
-      'SELECT bairro, rua, risco, detalhes FROM alertas WHERE rua LIKE ? OR'
-      ' bairro LIKE ?',
+      'SELECT bairro, rua, risco, horario_critico, detalhes FROM alertas WHERE'
+      ' rua LIKE ? OR bairro LIKE ? ORDER BY id DESC',
       (f'%{termo}%', f'%{termo}%'),
   )
   resultados = cursor.fetchall()
@@ -145,13 +159,15 @@ async def consultar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return
 
-  resposta = f"🔍 *Resultados para '{termo}':*\n\n"
+  resposta = f"🔍 *Alertas encontrados para '{termo}':*\n\n"
   for item in resultados:
-    bairro, rua, risco, detalhes = item
+    bairro, rua, risco, horario, detalhes = item
     alerta_emoji = '🟡' if risco == 1 else '🟧' if risco == 2 else '🔴'
     resposta += (
         f'{alerta_emoji} *Risco Nível {risco}*\n'
-        f'📍 *Bairro:* {bairro} | *Rua:* {rua}\n'
+        f'📍 *Bairro:* {bairro}\n'
+        f'🛣️ *Local/Rua:* {rua}\n'
+        f'⏰ *Horário Crítico:* {horario}\n'
         f'📝 *Detalhes:* {detalhes}\n'
         '------------------------\n'
     )
@@ -163,8 +179,8 @@ async def listar(update: Update, context: ContextTypes.DEFAULT_TYPE):
   conn = sqlite3.connect('banco_risco.db')
   cursor = conn.cursor()
   cursor.execute(
-      'SELECT bairro, rua, risco, detalhes FROM alertas ORDER BY id DESC LIMIT'
-      ' 10'
+      'SELECT bairro, rua, risco, horario_critico, detalhes FROM alertas ORDER'
+      ' BY id DESC LIMIT 10'
   )
   resultados = cursor.fetchall()
   conn.close()
@@ -175,8 +191,12 @@ async def listar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
   resposta = '📋 *Últimos 10 alertas cadastrados:*\n\n'
   for item in resultados:
-    bairro, rua, risco, detalhes = item
-    resposta += f'• *{rua}* ({bairro}) - Risco {risco}: {detalhes}\n'
+    bairro, rua, risco, horario, detalhes = item
+    alerta_emoji = '🟡' if risco == 1 else '🟧' if risco == 2 else '🔴'
+    resposta += (
+        f'{alerta_emoji} *{bairro}* ({rua})\n'
+        f'⏰ {horario} | ⚠️ Risco {risco}: {detalhes}\n\n'
+    )
 
   await update.message.reply_text(resposta, parse_mode='Markdown')
 
@@ -188,18 +208,15 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
   )
 
   try:
-    # Baixa áudio do Telegram
     voice_file = await context.bot.get_file(update.message.voice.file_id)
     oga_path = 'voice.oga'
     wav_path = 'voice.wav'
 
     await voice_file.download_to_drive(oga_path)
 
-    # Converte para WAV
     sound = AudioSegment.from_file(oga_path)
     sound.export(wav_path, format='wav')
 
-    # Transcreve Voz em Texto
     recognizer = sr.Recognizer()
     with sr.AudioFile(wav_path) as source:
       audio_data = recognizer.record(source)
@@ -207,20 +224,20 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
           audio_data, language='pt-BR'
       )
 
-    # Limpa arquivos temporários
     if os.path.exists(oga_path):
       os.remove(oga_path)
     if os.path.exists(wav_path):
       os.remove(wav_path)
 
-    # IA do Groq analisa o texto e extrai os campos
-    bairro, rua, risco_str, detalhes = extrair_dados_com_ia(texto_transcrito)
+    bairro, rua, risco_str, horario_critico, detalhes = extrair_dados_com_ia(
+        texto_transcrito
+    )
 
     if not bairro or bairro == 'Não informado':
       await update.message.reply_text(
           f'🗣️ *Você falou:* "_{texto_transcrito}_"\n\n'
-          '⚠️ Não consegui identificar o nome da rua ou bairro com clareza.'
-          ' Tente mencionar a rua e o bairro no áudio!',
+          '⚠️ Não consegui identificar o nome do bairro ou região com clareza.'
+          ' Tente mencionar o bairro no áudio!',
           parse_mode='Markdown',
       )
       return
@@ -230,13 +247,19 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except (ValueError, TypeError):
       risco = 2
 
-    # Salva no banco de dados
     conn = sqlite3.connect('banco_risco.db')
     cursor = conn.cursor()
+
+    # Garantir que a coluna 'horario_critico' exista no banco existente
+    cursor.execute('PRAGMA table_info(alertas)')
+    colunas = [coluna[1] for coluna in cursor.fetchall()]
+    if 'horario_critico' not in colunas:
+      cursor.execute('ALTER TABLE alertas ADD COLUMN horario_critico TEXT')
+
     cursor.execute(
-        'INSERT INTO alertas (bairro, rua, risco, detalhes) VALUES (?, ?, ?,'
-        ' ?)',
-        (bairro, rua, risco, detalhes),
+        'INSERT INTO alertas (bairro, rua, risco, horario_critico, detalhes)'
+        ' VALUES (?, ?, ?, ?, ?)',
+        (bairro, rua, risco, horario_critico, detalhes),
     )
     conn.commit()
     conn.close()
@@ -244,10 +267,11 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     alerta_emoji = '🟡' if risco == 1 else '🟧' if risco == 2 else '🔴'
     msg_sucesso = (
         f'🗣️ *Sua fala:* "_{texto_transcrito}_"\n\n'
-        f'🤖 *Interpretação da IA:*\n'
+        f'🤖 *Interpretação Inteligente:*\n'
         f'{alerta_emoji} *Alerta Salvo com Sucesso!*\n'
         f'📍 *Bairro:* {bairro}\n'
-        f'🛣️ *Rua:* {rua}\n'
+        f'🛣️ *Local/Rua:* {rua}\n'
+        f'⏰ *Horário Crítico:* {horario_critico}\n'
         f'⚠️ *Nível de Risco:* {risco}\n'
         f'📝 *Detalhes:* {detalhes}'
     )
@@ -277,5 +301,5 @@ if __name__ == '__main__':
   app_bot.add_handler(CommandHandler('listar', listar))
   app_bot.add_handler(MessageHandler(filters.VOICE, processar_audio))
 
-  print('Bot com IA Groq rodando...')
+  print('Bot com IA Groq e Mapeamento por Horário/Bairro rodando...')
   app_bot.run_polling()
