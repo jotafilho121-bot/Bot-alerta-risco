@@ -15,18 +15,13 @@ from telegram.ext import (
     filters,
 )
 
-# --- FLASK PARA O KEEP-ALIVE DO RENDER ---
+# --- SERVIDOR FLASK ---
 app = Flask(__name__)
 
 
 @app.route('/')
 def home():
   return 'Bot de Mapeamento de Risco Ativo!'
-
-
-def rodar_flask():
-  port = int(os.environ.get('PORT', 8080))
-  app.run(host='0.0.0.0', port=port)
 
 
 # --- LOGS E BANCO DE DADOS ---
@@ -37,23 +32,27 @@ logging.basicConfig(
 
 
 def iniciar_banco():
-  conn = sqlite3.connect('banco_risco.db')
-  cursor = conn.cursor()
-  cursor.execute('''
-        CREATE TABLE IF NOT EXISTS alertas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            bairro TEXT NOT NULL,
-            rua TEXT NOT NULL,
-            risco INTEGER NOT NULL,
-            horario_critico TEXT,
-            detalhes TEXT
-        )
-    ''')
-  conn.commit()
-  conn.close()
+  try:
+    conn = sqlite3.connect('banco_risco.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+            CREATE TABLE IF NOT EXISTS alertas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bairro TEXT NOT NULL,
+                rua TEXT NOT NULL,
+                risco INTEGER NOT NULL,
+                horario_critico TEXT,
+                detalhes TEXT
+            )
+        ''')
+    conn.commit()
+    conn.close()
+    logging.info('Banco de dados verificado/criado com sucesso.')
+  except Exception as e:
+    logging.error(f'Erro ao inicializar banco: {e}')
 
 
-# --- GERAR ÁUDIO DE FORMA NÃO BLOQUEANTE ---
+# --- FUNÇÕES DE ÁUDIO ---
 def gerar_audio_gtts(texto, caminho_arquivo):
   tts = gTTS(text=texto, lang='pt', tld='com.br')
   tts.save(caminho_arquivo)
@@ -65,7 +64,6 @@ async def enviar_resposta_em_audio(
   caminho_mp3 = f'resposta_{update.effective_chat.id}.mp3'
   try:
     loop = asyncio.get_running_loop()
-    # Executa a geração do áudio em uma thread separada para NÃO travar o bot
     await loop.run_in_executor(
         None, gerar_audio_gtts, texto_resposta, caminho_mp3
     )
@@ -88,11 +86,11 @@ async def enviar_resposta_em_audio(
         pass
 
 
-# --- INTEGRAÇÃO COM A GROQ ---
+# --- INTEGRAÇÃO GROQ ---
 def processar_relato_com_groq(caminho_audio):
   groq_api_key = os.environ.get('GROQ_API_KEY')
   if not groq_api_key:
-    logging.error('GROQ_API_KEY nao configurada.')
+    logging.error('GROQ_API_KEY nao encontrada nas variaveis de ambiente.')
     return None, None, None, None, None, None
 
   client = Groq(api_key=groq_api_key)
@@ -151,7 +149,7 @@ def processar_relato_com_groq(caminho_audio):
   return None, None, None, None, None, None
 
 
-# --- COMANDOS DO TELEGRAM ---
+# --- HANDLERS DO TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
   msg = (
       '🚨 *Bot de Mapeamento de Risco*\n\n'
@@ -242,7 +240,6 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await voice_file.download_to_drive(oga_path)
 
     loop = asyncio.get_running_loop()
-    # Executa a transcrição e Groq sem travar o loop de eventos
     (
         bairro,
         rua,
@@ -294,10 +291,7 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f'Nível de risco {risco}. Horário crítico: {horario_critico}.'
     )
 
-    # 1. Responde primeiro em texto
     await update.message.reply_text(msg_sucesso, parse_mode='Markdown')
-
-    # 2. Responde em áudio sem travar a execução
     asyncio.create_task(
         enviar_resposta_em_audio(update, context, fala_confirmacao)
     )
@@ -315,23 +309,31 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
 
-# --- INICIALIZAÇÃO DO BOT ---
-if __name__ == '__main__':
-  iniciar_banco()
-
-  # Sobe o servidor web Flask em thread separada
-  thread_flask = threading.Thread(target=rodar_flask, daemon=True)
-  thread_flask.start()
-
+# --- EXECUÇÃO DO BOT TELEGRAM ---
+def iniciar_telegram():
   telegram_token = os.environ.get('TELEGRAM_TOKEN')
   if not telegram_token:
-    logging.error('TELEGRAM_TOKEN ausente.')
-  else:
-    app_bot = ApplicationBuilder().token(telegram_token).build()
-    app_bot.add_handler(CommandHandler('start', start))
-    app_bot.add_handler(CommandHandler('consultar', consultar))
-    app_bot.add_handler(CommandHandler('listar', listar))
-    app_bot.add_handler(MessageHandler(filters.VOICE, processar_audio))
+    logging.error('TELEGRAM_TOKEN ausente nas variaveis de ambiente.')
+    return
 
-    logging.info('Bot iniciado com sucesso e aguardando mensagens!')
-    app_bot.run_polling(drop_pending_updates=True)
+  app_bot = ApplicationBuilder().token(telegram_token).build()
+  app_bot.add_handler(CommandHandler('start', start))
+  app_bot.add_handler(CommandHandler('consultar', consultar))
+  app_bot.add_handler(CommandHandler('listar', listar))
+  app_bot.add_handler(MessageHandler(filters.VOICE, processar_audio))
+
+  logging.info('Polling do Telegram iniciado com sucesso!')
+  app_bot.run_polling(drop_pending_updates=True)
+
+
+# --- INICIALIZAÇÃO INCONDICIONAL DAS THREADS ---
+iniciar_banco()
+
+# Dispara a escuta do Telegram em thread separada
+t_telegram = threading.Thread(target=iniciar_telegram, daemon=True)
+t_telegram.start()
+
+# Roda o Flask no processo principal se o script for chamado diretamente
+if __name__ == '__main__':
+  port = int(os.environ.get('PORT', 8080))
+  app.run(host='0.0.0.0', port=port)
