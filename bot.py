@@ -7,13 +7,14 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 import speech_recognition as sr
 from pydub import AudioSegment
+from groq import Groq
 
 # --- 1. MINI SERVIDOR WEB (Manter Render Ativo de Graça) ---
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot de Mapeamento de Risco (Voz Ativa) está Online!"
+    return "Bot de Mapeamento de Risco (IA Groq Ativa) está Online!"
 
 def run_web():
     port = int(os.environ.get('PORT', 8080))
@@ -30,7 +31,11 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-TOKEN = "8590309661:AAGZ4YVRfdBFXuQ4qUuWPvGloTMXe_DLRcc"
+# Leitura segura das chaves a partir das variáveis de ambiente do Render
+TOKEN = os.environ.get("TELEGRAM_TOKEN")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+
+client_groq = Groq(api_key=GROQ_API_KEY)
 
 def iniciar_banco():
     conn = sqlite3.connect("banco_risco.db")
@@ -47,15 +52,49 @@ def iniciar_banco():
     conn.commit()
     conn.close()
 
-# --- 3. COMANDOS POR TEXTO ---
+# --- 3. PROCESSAMENTO INTELIGENTE COM IA (GROQ / LLAMA 3) ---
+def extrair_dados_com_ia(texto_transcrito):
+    prompt = f"""
+    Você é um assistente especialista em analisar relatos de segurança pública e entregas na Baixada Fluminense.
+    Analise o texto abaixo dito por um entregador e extraia as informações de local e risco.
+
+    Texto falado: "{texto_transcrito}"
+
+    Retorne APENAS no formato exato separado por barras verticais "|":
+    BAIRRO | RUA | RISCO | DETALHES
+
+    Regras de Risco:
+    - Risco 1: Baixo (iluminação ruim, movimento suspeito leve)
+    - Risco 2: Médio (histórico de assaltos, furtos, atenção)
+    - Risco 3: Alto (área de risco máximo, grupo armado, troca de tiros, assalto a moto frequente)
+
+    Exemplo de Saída:
+    Grama | Rua Rocha Farias | 3 | Atuação de grupo armado e risco de assalto
+    
+    Se não identificar o bairro ou rua no texto, use "Não informado".
+    Responda APENAS a linha formatada com as barras verticais.
+    """
+
+    resposta = client_groq.chat.completions.create(
+        messages=[{"role": "user", "content": prompt}],
+        model="llama-3.3-70b-versatile",
+    )
+
+    resultado = resposta.choices[0].message.content.strip()
+    partes = [p.strip() for p in resultado.split("|")]
+
+    if len(partes) == 4:
+        return partes[0], partes[1], partes[2], partes[3]
+    return None, None, None, None
+
+# --- 4. COMANDOS DO TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
-        "🚨 *Bot de Mapeamento de Risco Ativo*\n\n"
-        "🎙️ *NOVO:* Agora você pode me enviar um **ÁUDIO DE VOZ** para cadastrar!\n"
-        "Exemplo de áudio: *'Cadastrar Miguel Couto - Rua Dagmar - Risco 3 - Assalto à noite'*\n\n"
+        "🚨 *Bot de Mapeamento de Risco (Com IA Ativa)*\n\n"
+        "🎙️ *Como cadastrar por Áudio:* Mandar um áudio falando normalmente!\n"
+        "Exemplo: *\"Atenção aqui na Rua Rocha Farias no Bairro da Grama, área com os cara armado, risco alto de assalto.\"*\n\n"
         "Comandos por texto:\n"
         "🔹 `/consultar [nome da rua ou bairro]`\n"
-        "🔹 `/cadastrar [Bairro] - [Rua] - [Risco 1 a 3] - [Detalhes]`\n"
         "🔹 `/listar` - Exibe os últimos cadastros"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
@@ -92,34 +131,6 @@ async def consultar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(resposta, parse_mode="Markdown")
 
-async def cadastrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    texto = " ".join(context.args)
-    processar_e_salvar(texto, update)
-
-def processar_e_salvar(texto_bruto, update_or_msg):
-    partes = [p.strip() for p in texto_bruto.split("-")]
-
-    if len(partes) < 4:
-        return False, "⚠️ Formato incorreto!\nUse: `Bairro - Rua - Risco - Detalhes`"
-
-    bairro, rua, risco_str, detalhes = partes[0], partes[1], partes[2], partes[3]
-
-    try:
-        risco = int(risco_str)
-    except ValueError:
-        return False, "⚠️ O nível de risco precisa ser um número (1, 2 ou 3)."
-
-    conn = sqlite3.connect("banco_risco.db")
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO alertas (bairro, rua, risco, detalhes) VALUES (?, ?, ?, ?)",
-        (bairro, rua, risco, detalhes)
-    )
-    conn.commit()
-    conn.close()
-
-    return True, f"✅ *Alerta salvo com sucesso!*\n📍 {rua} ({bairro}) - Risco {risco}\n📝 {detalhes}"
-
 async def listar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect("banco_risco.db")
     cursor = conn.cursor()
@@ -138,23 +149,23 @@ async def listar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(resposta, parse_mode="Markdown")
 
-# --- 4. PROCESSADOR DE MENSAGEM DE VOZ ---
+# --- 5. PROCESSADOR DE ÁUDIO COM INTELIGÊNCIA ARTIFICIAL ---
 async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg_espera = await update.message.reply_text("🎧 *Processando áudio de voz... Aguarde!*", parse_mode="Markdown")
+    msg_espera = await update.message.reply_text("🎧 *Ouvindo e analisando relato com IA...*", parse_mode="Markdown")
     
     try:
-        # Baixa o arquivo de áudio do Telegram
+        # Baixa áudio do Telegram
         voice_file = await context.bot.get_file(update.message.voice.file_id)
         oga_path = "voice.oga"
         wav_path = "voice.wav"
         
         await voice_file.download_to_drive(oga_path)
 
-        # Converte OGA para WAV
+        # Converte para WAV
         sound = AudioSegment.from_file(oga_path)
         sound.export(wav_path, format="wav")
 
-        # Reconhecimento de Fala
+        # Transcreve Voz em Texto
         recognizer = sr.Recognizer()
         with sr.AudioFile(wav_path) as source:
             audio_data = recognizer.record(source)
@@ -164,38 +175,58 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if os.path.exists(oga_path): os.remove(oga_path)
         if os.path.exists(wav_path): os.remove(wav_path)
 
-        # Envia transcrição para o usuário
-        await update.message.reply_text(f"🗣️ *Você falou:* \"_{texto_transcrito}_\"", parse_mode="Markdown")
+        # IA do Groq analisa o texto e extrai os campos
+        bairro, rua, risco_str, detalhes = extrair_dados_com_ia(texto_transcrito)
 
-        # Tenta cadastrar se contiver o padrão com separadores
-        if "-" in texto_transcrito:
-            sucesso, resposta = processar_e_salvar(texto_transcrito, update)
-            await update.message.reply_text(resposta, parse_mode="Markdown")
-        else:
+        if not bairro or bairro == "Não informado":
             await update.message.reply_text(
-                "💡 Para cadastrar por voz, fale com pausas ou diga a palavra hífen/traço entre as informações.\n"
-                "Exemplo: *Posse traço Rua das Flores traço 2 traço Cuidado com o sinal*",
+                f"🗣️ *Você falou:* \"_{texto_transcrito}_\"\n\n"
+                "⚠️ Não consegui identificar o nome da rua ou bairro com clareza. Tente mencionar a rua e o bairro no áudio!",
                 parse_mode="Markdown"
             )
+            return
+
+        try:
+            risco = int(risco_str)
+        except (ValueError, TypeError):
+            risco = 2
+
+        # Salva no banco de dados
+        conn = sqlite3.connect("banco_risco.db")
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO alertas (bairro, rua, risco, detalhes) VALUES (?, ?, ?, ?)",
+            (bairro, rua, risco, detalhes)
+        )
+        conn.commit()
+        conn.close()
+
+        alerta_emoji = "🟡" if risco == 1 else "🟧" if risco == 2 else "🔴"
+        msg_sucesso = (
+            f"🗣️ *Sua fala:* \"_{texto_transcrito}_\"\n\n"
+            f"🤖 *Interpretação da IA:*\n"
+            f"{alerta_emoji} *Alerta Salvo com Sucesso!*\n"
+            f"📍 *Bairro:* {bairro}\n"
+            f"🛣️ *Rua:* {rua}\n"
+            f"⚠️ *Nível de Risco:* {risco}\n"
+            f"📝 *Detalhes:* {detalhes}"
+        )
+        await update.message.reply_text(msg_sucesso, parse_mode="Markdown")
 
     except Exception as e:
-        await update.message.reply_text(f"❌ Não consegui entender o áudio com clareza. Tente falar novamente em um ambiente mais silencioso.")
+        await update.message.reply_text("❌ Não consegui processar o áudio. Tente falar novamente com mais clareza.")
 
-# --- 5. EXECUÇÃO DO BOT ---
+# --- 6. EXECUÇÃO DO BOT ---
 if __name__ == '__main__':
     keep_alive()
     iniciar_banco()
     
     app_bot = ApplicationBuilder().token(TOKEN).build()
     
-    # Handlers
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(CommandHandler("consultar", consultar))
-    app_bot.add_handler(CommandHandler("cadastrar", cadastrar))
     app_bot.add_handler(CommandHandler("listar", listar))
-    
-    # Escuta mensagens de voz
     app_bot.add_handler(MessageHandler(filters.VOICE, processar_audio))
 
-    print("Bot com suporte à voz rodando...")
+    print("Bot com IA Groq rodando...")
     app_bot.run_polling()
