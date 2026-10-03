@@ -1,9 +1,28 @@
+import os
 import sqlite3
 import logging
+from threading import Thread
+from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# Configuração de logs
+# --- 1. MINI SERVIDOR WEB (Para manter o Render ativo de graça) ---
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot de Mapeamento de Risco está Online!"
+
+def run_web():
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run_web)
+    t.daemon = True
+    t.start()
+
+# --- 2. CONFIGURAÇÕES E BANCO DE DADOS ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -11,7 +30,6 @@ logging.basicConfig(
 
 TOKEN = "8590309661:AAGZ4YVRfdBFXuQ4qUuWPvGloTMXe_DLRcc"
 
-# --- BANCO DE DADOS (SQLite) ---
 def iniciar_banco():
     conn = sqlite3.connect("banco_risco.db")
     cursor = conn.cursor()
@@ -27,10 +45,10 @@ def iniciar_banco():
     conn.commit()
     conn.close()
 
-# --- COMANDOS DO BOT ---
+# --- 3. COMANDOS DO BOT TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
-        "🚨 *Bot de Mapeamento de Risco Activo*\n\n"
+        "🚨 *Bot de Mapeamento de Risco Ativo*\n\n"
         "Comandos disponíveis:\n"
         "🔹 `/consultar [nome da rua ou bairro]` - Busca alertas salvos\n"
         "🔹 `/cadastrar [Bairro] - [Rua] - [Risco 1 a 3] - [Detalhes]` - Adiciona nova rua\n"
@@ -121,15 +139,20 @@ async def listar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(resposta, parse_mode="Markdown")
 
-# --- EXECUÇÃO ---
+# --- 4. EXECUÇÃO DOS SERVIÇOS ---
 if __name__ == '__main__':
+    # Inicia o servidor Web leve em segundo plano
+    keep_alive()
+    
+    # Inicia o banco de dados
     iniciar_banco()
-    app = ApplicationBuilder().token(TOKEN).build()
+    
+    # Inicia o Bot do Telegram
+    app_bot = ApplicationBuilder().token(TOKEN).build()
+    app_bot.add_handler(CommandHandler("start", start))
+    app_bot.add_handler(CommandHandler("consultar", consultar))
+    app_bot.add_handler(CommandHandler("cadastrar", cadastrar))
+    app_bot.add_handler(CommandHandler("listar", listar))
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("consultar", consultar))
-    app.add_handler(CommandHandler("cadastrar", cadastrar))
-    app.add_handler(CommandHandler("listar", listar))
-
-    print("Bot rodando...")
-    app.run_polling()
+    print("Bot e Servidor Web rodando...")
+    app_bot.run_polling()
