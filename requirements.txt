@@ -1,4 +1,5 @@
 python-telegram-bot
 gunicorn
 flask
-
+SpeechRecognition
+pydub
