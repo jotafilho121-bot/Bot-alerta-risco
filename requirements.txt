@@ -1,2 +1,4 @@
 python-telegram-bot
-nest-asyncio
+gunicorn
+flask
+
