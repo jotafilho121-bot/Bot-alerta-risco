@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 import sqlite3
-from threading import Thread
+import threading
 from flask import Flask
 from groq import Groq
 from gtts import gTTS
@@ -15,27 +15,21 @@ from telegram.ext import (
     filters,
 )
 
-# --- 1. SERVIDOR WEB PARA MANTER ONLINE NO RENDER ---
-app = Flask('')
+# --- FLASK PARA O KEEP-ALIVE DO RENDER ---
+app = Flask(__name__)
 
 
 @app.route('/')
 def home():
-  return 'Bot de Mapeamento de Risco esta Online e Ativo!'
+  return 'Bot de Mapeamento de Risco Ativo!'
 
 
-def run_web():
+def rodar_flask():
   port = int(os.environ.get('PORT', 8080))
   app.run(host='0.0.0.0', port=port)
 
 
-def keep_alive():
-  t = Thread(target=run_web)
-  t.daemon = True
-  t.start()
-
-
-# --- 2. CONFIGURAÇÕES E BANCO DE DADOS ---
+# --- LOGS E BANCO DE DADOS ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
@@ -59,34 +53,46 @@ def iniciar_banco():
   conn.close()
 
 
-# --- FUNÇÃO AUXILIAR: GERAR E ENVIAR RESPOSTA EM ÁUDIO ---
+# --- GERAR ÁUDIO DE FORMA NÃO BLOQUEANTE ---
+def gerar_audio_gtts(texto, caminho_arquivo):
+  tts = gTTS(text=texto, lang='pt', tld='com.br')
+  tts.save(caminho_arquivo)
+
+
 async def enviar_resposta_em_audio(
     update: Update, context: ContextTypes.DEFAULT_TYPE, texto_resposta: str
 ):
-  caminho_mp3 = 'resposta.mp3'
+  caminho_mp3 = f'resposta_{update.effective_chat.id}.mp3'
   try:
-    tts = gTTS(text=texto_resposta, lang='pt', tld='com.br')
-    tts.save(caminho_mp3)
+    loop = asyncio.get_running_loop()
+    # Executa a geração do áudio em uma thread separada para NÃO travar o bot
+    await loop.run_in_executor(
+        None, gerar_audio_gtts, texto_resposta, caminho_mp3
+    )
 
-    with open(caminho_mp3, 'rb') as audio_file:
-      await context.bot.send_audio(
-          chat_id=update.effective_chat.id,
-          audio=audio_file,
-          title='Alerta de Segurança',
-          filename='alerta.mp3',
-      )
+    if os.path.exists(caminho_mp3):
+      with open(caminho_mp3, 'rb') as audio_file:
+        await context.bot.send_audio(
+            chat_id=update.effective_chat.id,
+            audio=audio_file,
+            title='Alerta de Segurança',
+            filename='alerta.mp3',
+        )
   except Exception as e:
-    logging.error(f'Erro ao gerar audio de resposta: {e}')
+    logging.error(f'Erro ao gerar ou enviar audio: {e}')
   finally:
     if os.path.exists(caminho_mp3):
-      os.remove(caminho_mp3)
+      try:
+        os.remove(caminho_mp3)
+      except Exception:
+        pass
 
 
-# --- 3. TRANSCRIÇÃO E EXTRAÇÃO VIA GROQ AI ---
+# --- INTEGRAÇÃO COM A GROQ ---
 def processar_relato_com_groq(caminho_audio):
   groq_api_key = os.environ.get('GROQ_API_KEY')
   if not groq_api_key:
-    logging.error('ERRO: A variavel GROQ_API_KEY nao foi encontrada.')
+    logging.error('GROQ_API_KEY nao configurada.')
     return None, None, None, None, None, None
 
   client = Groq(api_key=groq_api_key)
@@ -145,14 +151,12 @@ def processar_relato_com_groq(caminho_audio):
   return None, None, None, None, None, None
 
 
-# --- 4. COMANDOS DO TELEGRAM ---
+# --- COMANDOS DO TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
   msg = (
-      '🚨 *Bot de Mapeamento de Risco com Resposta em Voz*\n\n'
-      '🎙️ *Como cadastrar por Áudio:* Envie um áudio com o local e o risco!\n'
-      ' Exemplo: *"Atenção na Rocha Farias no Bairro da Grama, área de risco 3'
-      ' a partir das 6 da tarde."*\n\n'
-      'Comandos por texto:\n'
+      '🚨 *Bot de Mapeamento de Risco*\n\n'
+      '🎙️ Envie um áudio informando o local e o nível de risco.\n\n'
+      'Comandos:\n'
       '🔹 `/consultar [bairro ou rua]`\n'
       '🔹 `/listar` - Exibe os últimos alertas'
   )
@@ -227,17 +231,18 @@ async def listar(update: Update, context: ContextTypes.DEFAULT_TYPE):
   await update.message.reply_text(resposta, parse_mode='Markdown')
 
 
-# --- 5. PROCESSADOR DE ÁUDIO ---
 async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
   await update.message.reply_text(
       '🎧 *Ouvindo e analisando relato com IA...*', parse_mode='Markdown'
   )
 
-  oga_path = 'voice.oga'
+  oga_path = f'voice_{update.effective_chat.id}.oga'
   try:
     voice_file = await context.bot.get_file(update.message.voice.file_id)
     await voice_file.download_to_drive(oga_path)
 
+    loop = asyncio.get_running_loop()
+    # Executa a transcrição e Groq sem travar o loop de eventos
     (
         bairro,
         rua,
@@ -245,18 +250,12 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         horario_critico,
         detalhes,
         texto_transcrito,
-    ) = processar_relato_com_groq(oga_path)
+    ) = await loop.run_in_executor(None, processar_relato_com_groq, oga_path)
 
-    if not bairro or bairro.lower() in [
-        'não informado',
-        'nao informado',
-        'none',
-    ]:
+    if not bairro:
       bairro = 'Bairro Identificado no Relato'
-
-    if not rua or rua.lower() in ['não informado', 'nao informado', 'none']:
+    if not rua:
       rua = 'Todo o Bairro / Vias de Acesso'
-
     if not horario_critico:
       horario_critico = 'Dia e Noite'
 
@@ -272,12 +271,6 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = sqlite3.connect('banco_risco.db')
     cursor = conn.cursor()
-
-    cursor.execute('PRAGMA table_info(alertas)')
-    colunas = [coluna[1] for coluna in cursor.fetchall()]
-    if 'horario_critico' not in colunas:
-      cursor.execute('ALTER TABLE alertas ADD COLUMN horario_critico TEXT')
-
     cursor.execute(
         'INSERT INTO alertas (bairro, rua, risco, horario_critico, detalhes)'
         ' VALUES (?, ?, ?, ?, ?)',
@@ -290,7 +283,7 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f'🗣️ *Sua fala:* "_{texto_transcrito}_"\n\n'
         f'🤖 *Alerta Cadastrado com Sucesso!*\n'
         f'📍 *Bairro:* {bairro}\n'
-        f'🛣️️ *Local/Rua:* {rua}\n'
+        f'🛣 *Local/Rua:* {rua}\n'
         f'⏰ *Horário Crítico:* {horario_critico}\n'
         f'⚠ *Nível de Risco:* {risco}\n'
         f'📝 *Detalhes:* {detalhes}'
@@ -301,8 +294,13 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f'Nível de risco {risco}. Horário crítico: {horario_critico}.'
     )
 
+    # 1. Responde primeiro em texto
     await update.message.reply_text(msg_sucesso, parse_mode='Markdown')
-    await enviar_resposta_em_audio(update, context, fala_confirmacao)
+
+    # 2. Responde em áudio sem travar a execução
+    asyncio.create_task(
+        enviar_resposta_em_audio(update, context, fala_confirmacao)
+    )
 
   except Exception as e:
     logging.error(f'Erro no processamento de áudio: {e}')
@@ -311,33 +309,29 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
   finally:
     if os.path.exists(oga_path):
-      os.remove(oga_path)
+      try:
+        os.remove(oga_path)
+      except Exception:
+        pass
 
 
-# --- 6. EXECUÇÃO ASSÍNCRONA ---
-async def main():
-  keep_alive()
+# --- INICIALIZAÇÃO DO BOT ---
+if __name__ == '__main__':
   iniciar_banco()
+
+  # Sobe o servidor web Flask em thread separada
+  thread_flask = threading.Thread(target=rodar_flask, daemon=True)
+  thread_flask.start()
 
   telegram_token = os.environ.get('TELEGRAM_TOKEN')
   if not telegram_token:
-    raise ValueError('A variavel TELEGRAM_TOKEN nao foi configurada!')
+    logging.error('TELEGRAM_TOKEN ausente.')
+  else:
+    app_bot = ApplicationBuilder().token(telegram_token).build()
+    app_bot.add_handler(CommandHandler('start', start))
+    app_bot.add_handler(CommandHandler('consultar', consultar))
+    app_bot.add_handler(CommandHandler('listar', listar))
+    app_bot.add_handler(MessageHandler(filters.VOICE, processar_audio))
 
-  app_bot = ApplicationBuilder().token(telegram_token).build()
-
-  app_bot.add_handler(CommandHandler('start', start))
-  app_bot.add_handler(CommandHandler('consultar', consultar))
-  app_bot.add_handler(CommandHandler('listar', listar))
-  app_bot.add_handler(MessageHandler(filters.VOICE, processar_audio))
-
-  print('Bot de Mapeamento Rodando...')
-
-  async with app_bot:
-    await app_bot.start()
-    await app_bot.updater.start_polling()
-    # Mantém o loop rodando continuamente no Render
-    await asyncio.Event().wait()
-
-
-if __name__ == '__main__':
-  asyncio.run(main())
+    logging.info('Bot iniciado com sucesso e aguardando mensagens!')
+    app_bot.run_polling(drop_pending_updates=True)
