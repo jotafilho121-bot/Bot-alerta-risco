@@ -4,6 +4,7 @@ import os
 import sqlite3
 import threading
 import edge_tts
+import requests
 from flask import Flask
 from groq import Groq
 from telegram import Update
@@ -15,7 +16,7 @@ from telegram.ext import (
     filters,
 )
 
-# --- SERVIDOR FLASK PARA KEEP-ALIVE ---
+# --- SERVIDOR FLASK (KEEP-ALIVE) ---
 app = Flask(__name__)
 
 
@@ -47,9 +48,36 @@ def iniciar_banco():
         ''')
     conn.commit()
     conn.close()
-    logging.info('Banco de dados verificado.')
+    logging.info('Banco de dados inicializado.')
   except Exception as e:
     logging.error(f'Erro no banco: {e}')
+
+
+# --- REVERSE GEOCODING (GPS PARA ENDEREÇO) ---
+def obter_endereco_gps(lat, lon):
+  try:
+    url = f'https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=18&addressdetails=1'
+    headers = {'User-Agent': 'BotSeguranca/1.0'}
+    res = requests.get(url, headers=headers, timeout=5)
+    if res.status_code == 200:
+      dados = res.json().get('address', {})
+      rua = (
+          dados.get('road')
+          or dados.get('pedestrian')
+          or dados.get('suburb')
+          or 'Via Próxima'
+      )
+      bairro = (
+          dados.get('suburb')
+          or dados.get('neighbourhood')
+          or dados.get('city_district')
+          or dados.get('city')
+          or 'Região Atual'
+      )
+      return bairro, rua
+  except Exception as e:
+    logging.error(f'Erro no geocoding: {e}')
+  return 'Região da Localização Enviada', 'Vias de Acesso'
 
 
 # --- VOZ NEURAL HUMANA ---
@@ -75,7 +103,7 @@ async def enviar_resposta_em_audio(
             filename='alerta.mp3',
         )
   except Exception as e:
-    logging.error(f'Erro ao gerar/enviar audio neural: {e}')
+    logging.error(f'Erro ao gerar/enviar audio: {e}')
   finally:
     if os.path.exists(caminho_mp3):
       try:
@@ -84,74 +112,64 @@ async def enviar_resposta_em_audio(
         pass
 
 
-# --- INTEGRAÇÃO GROQ ---
-def processar_relato_com_groq(caminho_audio, localizacao_contexto=''):
+# --- MOTOR DE INTELIGÊNCIA ARTIFICIAL (TEXTO/ÁUDIO) ---
+def analisar_mensagem_com_groq(texto_entrada, contexto_gps=''):
   groq_api_key = os.environ.get('GROQ_API_KEY')
   if not groq_api_key:
-    logging.error('GROQ_API_KEY ausente.')
-    return 'ERRO', 'Chave de API nao configurada.', None, None, None, None
+    return 'ERRO', 'Chave GROQ_API_KEY nao configurada.', None, None, None, None
 
   client = Groq(api_key=groq_api_key)
 
+  prompt = f"""
+    Voce e um assistente de risco viario para entregadores em Nova Iguacu e Baixada Fluminense.
+    Analise a mensagem abaixo recebida por texto ou transcricao de audio.
+
+    {contexto_gps}
+    Mensagem recebida: "{texto_entrada}"
+
+    A intencao do usuario e CONSULTAR (perguntar sobre seguranca) ou CADASTRAR (relatar risco/assalto/perigo)?
+
+    Responda ESTRITAMENTE em um dos dois formatos:
+
+    Se for CONSULTA:
+    CONSULTA | NOME_DO_BAIRRO_OU_RUA | {texto_entrada}
+
+    Se for CADASTRO:
+    CADASTRO | BAIRRO | RUA | RISCO (1, 2 ou 3) | HORARIO_CRITICO | DETALHES | {texto_entrada}
+
+    Regras para Cadastro:
+    - RISCO: 1=Baixo, 2=Medio, 3=Alto/Critico.
+    - Se o usuario disser "aqui", "nesta rua" ou "este local" e houver informacao de GPS no contexto, USE o bairro e rua do GPS.
+    - Se nao souber a rua exata, coloque "Vias do Bairro".
+    - Resumo claro, objetivo e neutro.
+    """
+
   try:
-    with open(caminho_audio, 'rb') as file:
-      transcription = client.audio.transcriptions.create(
-          file=(caminho_audio, file.read()),
-          model='whisper-large-v3-turbo',
-          language='pt',
-          response_format='text',
-      )
-
-    texto_transcrito = str(transcription).strip()
-
-    prompt = f"""
-        Voce e um assistente de risco viario para entregadores em Nova Iguacu e Baixada Fluminense.
-        Analise a transcricao abaixo e identifique a INTENCAO do usuario.
-        {localizacao_contexto}
-
-        Texto falado: "{texto_transcrito}"
-
-        A intencao e CONSULTAR (perguntar sobre a seguranca de um local) ou CADASTRAR (relatar um perigo/assalto/risco na localizacao atual ou citada)?
-
-        Responda ESTRITAMENTE em um dos dois formatos abaixo:
-
-        Se for CONSULTA:
-        CONSULTA | NOME_DO_BAIRRO_OU_RUA | {texto_transcrito}
-
-        Se for CADASTRO:
-        CADASTRO | BAIRRO | RUA | RISCO (1, 2 ou 3) | HORARIO_CRITICO | DETALHES | {texto_transcrito}
-
-        Regras para Cadastro:
-        - RISCO: 1=Baixo, 2=Medio, 3=Alto/Critico.
-        - Se o usuario mencionar "aqui" ou "esta area" e houver localizacao citada, use a regiao correspondente.
-        - Se nao citar rua, use "Todo o Bairro / Vias de Acesso".
-        - Resumo neutro e direto sem girias.
-        """
-
     resposta = client.chat.completions.create(
         messages=[{'role': 'user', 'content': prompt}],
         model='llama-3.3-70b-versatile',
     )
-
     resultado = resposta.choices[0].message.content.strip()
     partes = [p.strip() for p in resultado.split('|')]
     return partes
-
   except Exception as e:
-    logging.error(f'Erro no Groq: {e}')
+    logging.error(f'Erro na chamada Groq: {e}')
     return 'ERRO', str(e), None, None, None, None
 
 
 # --- HANDLERS DO TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
   msg = (
-      '🚨 *Bot de Mapeamento de Risco*\n\n'
-      '🎙️ Envie um áudio relando um risco ou consultando uma área.\n'
-      '📍 Você também pode compartilhar sua localização para vincular aos'
-      ' relatos.\n\n'
-      'Comandos:\n'
-      '🔹 `/consultar [bairro ou rua]`\n'
-      '🔹 `/listar` - Exibe os últimos alertas'
+      '🚨 *Bot de Mapeamento de Risco (Híbrido)*\n\n'
+      'Você pode interagir enviando *Texto*, *Áudio* ou *Localização GPS*:\n\n'
+      '🔹 *Consulta:* Digite ou fale ex: _"Como tá a Rua Menezes de Avellar?"_\n'
+      '🔹 *Cadastro:* Digite ou fale ex: _"Assalto recente no Austin perto do'
+      ' posto, risco alto"_\n'
+      '📍 *GPS:* Envie sua localização atual para vincular aos relatos ou'
+      ' consultas.\n\n'
+      'Comandos diretos:\n'
+      '• `/consultar [bairro ou rua]`\n'
+      '• `/listar` - Exibe últimos alertas'
   )
   await update.message.reply_text(msg, parse_mode='Markdown')
 
@@ -162,19 +180,157 @@ async def receber_localizacao(
   lat = update.message.location.latitude
   lon = update.message.location.longitude
 
-  # Salva a última localização no contexto da conversa
+  bairro, rua = obter_endereco_gps(lat, lon)
+
   context.user_data['lat'] = lat
   context.user_data['lon'] = lon
+  context.user_data['bairro'] = bairro
+  context.user_data['rua'] = rua
 
   msg = (
-      f'📍 *Localização recebida!* (Lat: {lat:.4f}, Lon: {lon:.4f})\n\n'
-      'Agora envie um áudio relando o nível de risco desta área ou fazendo uma'
-      ' consulta.'
+      f'📍 *Localização Identificada!*\n\n'
+      f'• *Bairro:* {bairro}\n'
+      f'• *Rua/Referência:* {rua}\n\n'
+      'Agora escreva uma mensagem ou mande um áudio relatando o risco ou'
+      ' fazendo uma consulta sobre este local.'
   )
   await update.message.reply_text(msg, parse_mode='Markdown')
 
 
-async def consultar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def processar_mensagem(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+  # Identifica se é áudio ou texto digitado
+  if update.message.voice:
+    await update.message.reply_text(
+        '🎧 *Ouvindo áudio...*', parse_mode='Markdown'
+    )
+    oga_path = f'voice_{update.effective_chat.id}.oga'
+    try:
+      voice_file = await context.bot.get_file(update.message.voice.file_id)
+      await voice_file.download_to_drive(oga_path)
+
+      # Transcrição Whisper Groq
+      groq_api_key = os.environ.get('GROQ_API_KEY')
+      client = Groq(api_key=groq_api_key)
+      with open(oga_path, 'rb') as file:
+        transcription = client.audio.transcriptions.create(
+            file=(oga_path, file.read()),
+            model='whisper-large-v3-turbo',
+            language='pt',
+            response_format='text',
+        )
+      texto_entrada = str(transcription).strip()
+    except Exception as e:
+      logging.error(f'Erro na transcrição de áudio: {e}')
+      await update.message.reply_text(
+          '❌ Erro ao processar o áudio. Tente novamente.'
+      )
+      return
+    finally:
+      if os.path.exists(oga_path):
+        try:
+          os.remove(oga_path)
+        except Exception:
+          pass
+  else:
+    texto_entrada = update.message.text.strip()
+
+  # Contexto do GPS
+  contexto_gps = ''
+  if 'bairro' in context.user_data and 'rua' in context.user_data:
+    contexto_gps = (
+        f"O usuário compartilhou GPS localizad em: Bairro"
+        f" '{context.user_data['bairro']}', Rua '{context.user_data['rua']}'."
+    )
+
+  # Chama o motor da Groq
+  dados = analisar_mensagem_com_groq(texto_entrada, contexto_gps)
+  tipo_acao = dados[0]
+
+  if tipo_acao == 'CONSULTA':
+    termo_busca = dados[1] if len(dados) > 1 else 'Região'
+
+    conn = sqlite3.connect('banco_risco.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT bairro, rua, risco, horario_critico, detalhes FROM alertas'
+        ' WHERE rua LIKE ? OR bairro LIKE ? ORDER BY id DESC',
+        (f'%{termo_busca}%', f'%{termo_busca}%'),
+    )
+    resultados = cursor.fetchall()
+    conn.close()
+
+    if not resultados:
+      msg = f'✅ Nenhum alerta de risco registrado para *{termo_busca}*.'
+      await update.message.reply_text(msg, parse_mode='Markdown')
+      if update.message.voice:
+        await enviar_resposta_em_audio(
+            update, context, f'Nenhum alerta cadastrado para {termo_busca}.'
+        )
+      return
+
+    resposta_texto = f'🔍 *Alertas encontrados para {termo_busca}:*\n\n'
+    texto_audio = f'Alertas encontrados para {termo_busca}. '
+
+    for item in resultados:
+      bairro, rua, risco, horario, detalhes = item
+      resposta_texto += (
+          f'⚠️ *Risco Nível {risco}*\n📍 *Bairro:* {bairro}\n🛣️ *Rua:*'
+          f' {rua}\n⏰ *Horário:* {horario}\n📝 *Detalhes:* {detalhes}\n---\n'
+      )
+      texto_audio += f'No bairro {bairro}, rua {rua}, risco nível {risco}. Detalhes: {detalhes}. '
+
+    await update.message.reply_text(resposta_texto, parse_mode='Markdown')
+
+    # Envia áudio se a pergunta tiver sido por áudio
+    if update.message.voice:
+      await enviar_resposta_em_audio(update, context, texto_audio)
+
+  elif tipo_acao == 'CADASTRO' and len(dados) >= 6:
+    _, bairro, rua, risco_str, horario_critico, detalhes = dados[:6]
+
+    try:
+      risco = int(risco_str)
+    except (ValueError, TypeError):
+      risco = 3
+
+    conn = sqlite3.connect('banco_risco.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        'INSERT INTO alertas (bairro, rua, risco, horario_critico, detalhes)'
+        ' VALUES (?, ?, ?, ?, ?)',
+        (bairro, rua, risco, horario_critico, detalhes),
+    )
+    conn.commit()
+    conn.close()
+
+    msg_sucesso = (
+        f'🤖 *Alerta Cadastrado com Sucesso!*\n\n'
+        f'📍 *Bairro:* {bairro}\n'
+        f'🛣️ *Rua/Local:* {rua}\n'
+        f'⏰ *Horário Crítico:* {horario_critico}\n'
+        f'⚠️️ *Nível de Risco:* {risco}\n'
+        f'📝 *Detalhes:* {detalhes}'
+    )
+
+    await update.message.reply_text(msg_sucesso, parse_mode='Markdown')
+
+    if update.message.voice:
+      fala_confirmacao = (
+          f'Alerta salvo com sucesso. Bairro {bairro}, local {rua}. Nível de'
+          f' risco {risco}.'
+      )
+      await enviar_resposta_em_audio(update, context, fala_confirmacao)
+
+  else:
+    await update.message.reply_text(
+        '⚠️ Não entendi a mensagem. Você pode enviar uma pergunta ou um relato'
+        ' citando o bairro/rua por texto ou áudio.'
+    )
+
+
+async def consultar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
   if not context.args:
     await update.message.reply_text(
         '⚠️ Use: `/consultar [Nome da Rua ou Bairro]`', parse_mode='Markdown'
@@ -193,31 +349,23 @@ async def consultar(update: Update, context: ContextTypes.DEFAULT_TYPE):
   conn.close()
 
   if not resultados:
-    msg_no = f'Nenhum alerta cadastrado para {termo}.'
-    await update.message.reply_text(f'✅ {msg_no}')
-    await enviar_resposta_em_audio(update, context, msg_no)
+    await update.message.reply_text(
+        f'✅ Nenhum alerta cadastrado para *{termo}*.', parse_mode='Markdown'
+    )
     return
 
-  resposta = f'🔍 Alertas encontrados para {termo}:\n\n'
-  texto_fala = f'Alertas encontrados para {termo}. '
-
+  resposta = f'🔍 *Alertas encontrados para {termo}:*\n\n'
   for item in resultados:
     bairro, rua, risco, horario, detalhes = item
     resposta += (
-        f'⚠️ *Risco Nível {risco}*\n'
-        f'📍 *Bairro:* {bairro}\n'
-        f'🛣️ *Local/Rua:* {rua}\n'
-        f'⏰ *Horário:* {horario}\n'
-        f'📝 *Detalhes:* {detalhes}\n'
-        '------------------------\n'
+        f'⚠️ *Risco Nível {risco}*\n📍 *Bairro:* {bairro}\n🛣️ *Local:*'
+        f' {rua}\n⏰ *Horário:* {horario}\n📝 *Detalhes:* {detalhes}\n---\n'
     )
-    texto_fala += f'No bairro {bairro}, local {rua}, risco nível {risco}. Detalhes: {detalhes}. '
 
   await update.message.reply_text(resposta, parse_mode='Markdown')
-  await enviar_resposta_em_audio(update, context, texto_fala)
 
 
-async def listar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def listar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
   conn = sqlite3.connect('banco_risco.db')
   cursor = conn.cursor()
   cursor.execute(
@@ -241,134 +389,11 @@ async def listar(update: Update, context: ContextTypes.DEFAULT_TYPE):
   await update.message.reply_text(resposta, parse_mode='Markdown')
 
 
-async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-  await update.message.reply_text(
-      '🎧 *Ouvindo e analisando relato com IA...*', parse_mode='Markdown'
-  )
-
-  oga_path = f'voice_{update.effective_chat.id}.oga'
-  try:
-    voice_file = await context.bot.get_file(update.message.voice.file_id)
-    await voice_file.download_to_drive(oga_path)
-
-    # Verifica se existe localização armazenada na sessão
-    ctx_loc = ''
-    if 'lat' in context.user_data and 'lon' in context.user_data:
-      ctx_loc = (
-          f"O usuário compartilhou as coordenadas de GPS: Lat"
-          f" {context.user_data['lat']}, Lon {context.user_data['lon']}."
-      )
-
-    loop = asyncio.get_running_loop()
-    dados = await loop.run_in_executor(
-        None, processar_relato_com_groq, oga_path, ctx_loc
-    )
-
-    tipo_acao = dados[0]
-
-    if tipo_acao == 'CONSULTA':
-      termo_busca = dados[1] if len(dados) > 1 else 'Região'
-      texto_fala_original = dados[2] if len(dados) > 2 else ''
-
-      conn = sqlite3.connect('banco_risco.db')
-      cursor = conn.cursor()
-      cursor.execute(
-          'SELECT bairro, rua, risco, horario_critico, detalhes FROM alertas'
-          ' WHERE rua LIKE ? OR bairro LIKE ? ORDER BY id DESC',
-          (f'%{termo_busca}%', f'%{termo_busca}%'),
-      )
-      resultados = cursor.fetchall()
-      conn.close()
-
-      if not resultados:
-        msg = (
-            f'🗣️ *Você perguntou:* "_{texto_fala_original}_"\n\n'
-            f'✅ Nenhum alerta cadastrado para *{termo_busca}*.'
-        )
-        await update.message.reply_text(msg, parse_mode='Markdown')
-        await enviar_resposta_em_audio(
-            update, context, f'Nenhum alerta cadastrado para {termo_busca}.'
-        )
-        return
-
-      resposta_texto = (
-          f'🗣️ *Você perguntou:* "_{texto_fala_original}_"\n\n'
-          f'🔍 *Alertas para {termo_busca}:*\n\n'
-      )
-      texto_audio = f'Alertas encontrados para {termo_busca}. '
-
-      for item in resultados:
-        bairro, rua, risco, horario, detalhes = item
-        resposta_texto += (
-            f'⚠️ *Risco Nível {risco}*\n📍 *Bairro:* {bairro}\n🛣️ *Rua:*'
-            f' {rua}\n⏰ *Horário:* {horario}\n📝 *Detalhes:* {detalhes}\n---\n'
-        )
-        texto_audio += f'No bairro {bairro}, local {rua}, risco nível {risco}. Detalhes: {detalhes}. '
-
-      await update.message.reply_text(resposta_texto, parse_mode='Markdown')
-      await enviar_resposta_em_audio(update, context, texto_audio)
-
-    elif tipo_acao == 'CADASTRO' and len(dados) >= 6:
-      _, bairro, rua, risco_str, horario_critico, detalhes = dados[:6]
-      texto_transcrito = dados[6] if len(dados) > 6 else ''
-
-      try:
-        risco = int(risco_str)
-      except (ValueError, TypeError):
-        risco = 3
-
-      conn = sqlite3.connect('banco_risco.db')
-      cursor = conn.cursor()
-      cursor.execute(
-          'INSERT INTO alertas (bairro, rua, risco, horario_critico, detalhes)'
-          ' VALUES (?, ?, ?, ?, ?)',
-          (bairro, rua, risco, horario_critico, detalhes),
-      )
-      conn.commit()
-      conn.close()
-
-      msg_sucesso = (
-          f'🗣️ *Sua fala:* "_{texto_transcrito}_"\n\n'
-          f'🤖 *Alerta Cadastrado com Sucesso!*\n'
-          f'📍 *Bairro:* {bairro}\n'
-          f'🛣 *Local/Rua:* {rua}\n'
-          f'⏰ *Horário Crítico:* {horario_critico}\n'
-          f'⚠ *Nível de Risco:* {risco}\n'
-          f'📝 *Detalhes:* {detalhes}'
-      )
-
-      fala_confirmacao = (
-          f'Alerta salvo com sucesso. Bairro {bairro}, local {rua}. Nível de'
-          f' risco {risco}.'
-      )
-
-      await update.message.reply_text(msg_sucesso, parse_mode='Markdown')
-      await enviar_resposta_em_audio(update, context, fala_confirmacao)
-
-    else:
-      await update.message.reply_text(
-          '⚠️ Não entendi se você queria cadastrar ou consultar. Pode'
-          ' repetir informando o nome do bairro ou rua?'
-      )
-
-  except Exception as e:
-    logging.error(f'Erro no processamento de áudio: {e}')
-    await update.message.reply_text(
-        '❌ Erro ao processar o áudio. Tente novamente.'
-    )
-  finally:
-    if os.path.exists(oga_path):
-      try:
-        os.remove(oga_path)
-      except Exception:
-        pass
-
-
 async def lidar_com_erros(update: object, context: ContextTypes.DEFAULT_TYPE):
-  logging.error(f'Exceção capturada no handler do Telegram: {context.error}')
+  logging.error(f'Exceção no bot: {context.error}')
 
 
-# --- EXECUÇÃO DO BOT ---
+# --- EXECUÇÃO PRINCIPAL ---
 def rodar_bot():
   telegram_token = os.environ.get('TELEGRAM_TOKEN')
   if not telegram_token:
@@ -380,7 +405,7 @@ def rodar_bot():
 
   app_bot = ApplicationBuilder().token(telegram_token).build()
 
-  # Handler global de erros para evitar queda da thread
+  # Evita travamento por exceções
   app_bot.add_error_handler(lidar_com_erros)
 
   loop.run_until_complete(
@@ -388,12 +413,18 @@ def rodar_bot():
   )
 
   app_bot.add_handler(CommandHandler('start', start))
-  app_bot.add_handler(CommandHandler('consultar', consultar))
-  app_bot.add_handler(CommandHandler('listar', listar))
+  app_bot.add_handler(CommandHandler('consultar', consultar_cmd))
+  app_bot.add_handler(CommandHandler('listar', listar_cmd))
   app_bot.add_handler(MessageHandler(filters.LOCATION, receber_localizacao))
-  app_bot.add_handler(MessageHandler(filters.VOICE, processar_audio))
 
-  logging.info('Polling ativado com sucesso!')
+  # Handler unificado para Texto e Áudio
+  app_bot.add_handler(
+      MessageHandler(
+          filters.TEXT | filters.VOICE & ~filters.COMMAND, processar_mensagem
+      )
+  )
+
+  logging.info('Polling ativo no modo Híbrido!')
   app_bot.run_polling(drop_pending_updates=True, stop_signals=None)
 
 
