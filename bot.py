@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import sqlite3
@@ -91,7 +92,6 @@ def processar_relato_com_groq(caminho_audio):
   client = Groq(api_key=groq_api_key)
 
   try:
-    # 1. Transcrição do áudio com Whisper da Groq
     with open(caminho_audio, 'rb') as file:
       transcription = client.audio.transcriptions.create(
           file=(caminho_audio, file.read()),
@@ -102,7 +102,6 @@ def processar_relato_com_groq(caminho_audio):
 
     texto_transcrito = str(transcription).strip()
 
-    # 2. Extração estruturada com Llama-3.3
     prompt = f"""
         Voce e um assistente especializado em mapeamento de risco viario para entregadores em Nova Iguacu e Baixada Fluminense.
         Analise a transcricao da fala do entregador e extraia os dados.
@@ -228,7 +227,7 @@ async def listar(update: Update, context: ContextTypes.DEFAULT_TYPE):
   await update.message.reply_text(resposta, parse_mode='Markdown')
 
 
-# --- 5. PROCESSADOR DE ÁUDIO REPETIDO COM IA ---
+# --- 5. PROCESSADOR DE ÁUDIO ---
 async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
   await update.message.reply_text(
       '🎧 *Ouvindo e analisando relato com IA...*', parse_mode='Markdown'
@@ -271,7 +270,6 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
           texto_transcrito if texto_transcrito else 'Relato de risco registrado'
       )
 
-    # Salva no Banco de Dados
     conn = sqlite3.connect('banco_risco.db')
     cursor = conn.cursor()
 
@@ -292,9 +290,9 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f'🗣️ *Sua fala:* "_{texto_transcrito}_"\n\n'
         f'🤖 *Alerta Cadastrado com Sucesso!*\n'
         f'📍 *Bairro:* {bairro}\n'
-        f'🛣️ *Local/Rua:* {rua}\n'
+        f'🛣️️ *Local/Rua:* {rua}\n'
         f'⏰ *Horário Crítico:* {horario_critico}\n'
-        f'⚠️️ *Nível de Risco:* {risco}\n'
+        f'⚠ *Nível de Risco:* {risco}\n'
         f'📝 *Detalhes:* {detalhes}'
     )
 
@@ -316,8 +314,8 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
       os.remove(oga_path)
 
 
-# --- 6. EXECUÇÃO DO BOT ---
-if __name__ == '__main__':
+# --- 6. EXECUÇÃO ASSÍNCRONA ---
+async def main():
   keep_alive()
   iniciar_banco()
 
@@ -333,4 +331,13 @@ if __name__ == '__main__':
   app_bot.add_handler(MessageHandler(filters.VOICE, processar_audio))
 
   print('Bot de Mapeamento Rodando...')
-  app_bot.run_polling()
+
+  async with app_bot:
+    await app_bot.start()
+    await app_bot.updater.start_polling()
+    # Mantém o loop rodando continuamente no Render
+    await asyncio.Event().wait()
+
+
+if __name__ == '__main__':
+  asyncio.run(main())
