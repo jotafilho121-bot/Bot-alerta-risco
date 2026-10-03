@@ -5,7 +5,6 @@ from threading import Thread
 from flask import Flask
 from groq import Groq
 from gtts import gTTS
-import speech_recognition as sr
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -15,7 +14,7 @@ from telegram.ext import (
     filters,
 )
 
-# --- 1. SERVIDOR WEB PARA MANTER ONLINE ---
+# --- 1. SERVIDOR WEB PARA MANTER ONLINE NO RENDER ---
 app = Flask('')
 
 
@@ -59,7 +58,7 @@ def iniciar_banco():
   conn.close()
 
 
-# --- FUNÇÃO AUXILIAR: ENVIAR ÁUDIO DE RESPOSTA ---
+# --- FUNÇÃO AUXILIAR: GERAR E ENVIAR RESPOSTA EM ÁUDIO ---
 async def enviar_resposta_em_audio(
     update: Update, context: ContextTypes.DEFAULT_TYPE, texto_resposta: str
 ):
@@ -73,6 +72,7 @@ async def enviar_resposta_em_audio(
           chat_id=update.effective_chat.id,
           audio=audio_file,
           title='Alerta de Segurança',
+          filename='alerta.mp3',
       )
   except Exception as e:
     logging.error(f'Erro ao gerar audio de resposta: {e}')
@@ -81,40 +81,48 @@ async def enviar_resposta_em_audio(
       os.remove(caminho_mp3)
 
 
-# --- 3. PROCESSAMENTO INTELIGENTE COM IA (GROQ) ---
-def extrair_dados_com_ia(texto_transcrito):
+# --- 3. TRANSCRIÇÃO E EXTRAÇÃO VIA GROQ AI ---
+def processar_relato_com_groq(caminho_audio):
   groq_api_key = os.environ.get('GROQ_API_KEY')
-
   if not groq_api_key:
     logging.error('ERRO: A variavel GROQ_API_KEY nao foi encontrada.')
-    return None, None, None, None, None
+    return None, None, None, None, None, None
 
-  client_groq = Groq(api_key=groq_api_key)
-
-  prompt = f"""
-    Voce e um assistente especializado em mapeamento de risco viario para entregadores em Nova Iguacu e Baixada Fluminense.
-    Analise a transcricao da fala do entregador e extraia os dados.
-
-    Texto falado: "{texto_transcrito}"
-
-    Formato de resposta OBRIGATORIO (separado estritamente por |):
-    BAIRRO | RUA | RISCO | HORARIO_CRITICO | DETALHES
-
-    Regras:
-    - BAIRRO: Nome do bairro citado (Ex: Jardim Geneciano, Grama, Austin, Ambai).
-    - RUA: Nome da rua/avenida citada. Se o relato for sobre o bairro inteiro ou nao citar rua, escreva "Todo o Bairro / Vias de Acesso".
-    - RISCO: Um numero simples (1, 2 ou 3). 1=Baixo, 2=Medio, 3=Alto/Critico.
-    - HORARIO_CRITICO: Periodo citado (Ex: "Apos 17h", "A noite", "Dia e Noite").
-    - DETALHES: Breve resumo neutro e direto sem usar girias nem nomes de faccoes.
-
-    Exemplo de Saida:
-    Jardim Geneciano | Todo o Bairro / Vias de Acesso | 3 | Apos 17h | Atencao elevada nas vias de acesso no periodo noturno.
-
-    Retorne APENAS a linha no formato indicado.
-    """
+  client = Groq(api_key=groq_api_key)
 
   try:
-    resposta = client_groq.chat.completions.create(
+    # 1. Transcrição do áudio com Whisper da Groq
+    with open(caminho_audio, 'rb') as file:
+      transcription = client.audio.transcriptions.create(
+          file=(caminho_audio, file.read()),
+          model='whisper-large-v3-turbo',
+          language='pt',
+          response_format='text',
+      )
+
+    texto_transcrito = str(transcription).strip()
+
+    # 2. Extração estruturada com Llama-3.3
+    prompt = f"""
+        Voce e um assistente especializado em mapeamento de risco viario para entregadores em Nova Iguacu e Baixada Fluminense.
+        Analise a transcricao da fala do entregador e extraia os dados.
+
+        Texto falado: "{texto_transcrito}"
+
+        Formato de resposta OBRIGATORIO (separado estritamente por |):
+        BAIRRO | RUA | RISCO | HORARIO_CRITICO | DETALHES
+
+        Regras:
+        - BAIRRO: Nome do bairro citado (Ex: Jardim Geneciano, Grama, Austin, Ambai).
+        - RUA: Nome da rua/avenida citada. Se o relato for sobre o bairro inteiro ou nao citar rua, escreva "Todo o Bairro / Vias de Acesso".
+        - RISCO: Um numero simples (1, 2 ou 3). 1=Baixo, 2=Medio, 3=Alto/Critico.
+        - HORARIO_CRITICO: Periodo citado (Ex: "Apos 17h", "A noite", "Dia e Noite").
+        - DETALHES: Breve resumo neutro e direto sem usar girias nem nomes de faccoes.
+
+        Retorne APENAS a linha no formato indicado.
+        """
+
+    resposta = client.chat.completions.create(
         messages=[{'role': 'user', 'content': prompt}],
         model='llama-3.3-70b-versatile',
     )
@@ -123,11 +131,19 @@ def extrair_dados_com_ia(texto_transcrito):
     partes = [p.strip() for p in resultado.split('|')]
 
     if len(partes) == 5:
-      return partes[0], partes[1], partes[2], partes[3], partes[4]
-  except Exception as e:
-    logging.error(f'Erro na chamada da API Groq: {e}')
+      return (
+          partes[0],
+          partes[1],
+          partes[2],
+          partes[3],
+          partes[4],
+          texto_transcrito,
+      )
 
-  return None, None, None, None, None
+  except Exception as e:
+    logging.error(f'Erro no processamento Groq: {e}')
+
+  return None, None, None, None, None, None
 
 
 # --- 4. COMANDOS DO TELEGRAM ---
@@ -169,20 +185,20 @@ async def consultar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await enviar_resposta_em_audio(update, context, msg_no)
     return
 
-  resposta = f"🔍 Alertas encontrados para {termo}:\n\n"
-  texto_fala = f"Alertas encontrados para {termo}. "
+  resposta = f'🔍 Alertas encontrados para {termo}:\n\n'
+  texto_fala = f'Alertas encontrados para {termo}. '
 
   for item in resultados:
     bairro, rua, risco, horario, detalhes = item
     resposta += (
         f'⚠️ *Risco Nível {risco}*\n'
         f'📍 *Bairro:* {bairro}\n'
-        f'🛣️️ *Local/Rua:* {rua}\n'
+        f'🛣️ *Local/Rua:* {rua}\n'
         f'⏰ *Horário Crítico:* {horario}\n'
         f'📝 *Detalhes:* {detalhes}\n'
         '------------------------\n'
     )
-    texto_fala += f"No bairro {bairro}, local {rua}, risco nível {risco}. Horário crítico: {horario}. Detalhes: {detalhes}. "
+    texto_fala += f'No bairro {bairro}, local {rua}, risco nível {risco}. Horário crítico: {horario}. Detalhes: {detalhes}. '
 
   await update.message.reply_text(resposta, parse_mode='Markdown')
   await enviar_resposta_em_audio(update, context, texto_fala)
@@ -212,31 +228,25 @@ async def listar(update: Update, context: ContextTypes.DEFAULT_TYPE):
   await update.message.reply_text(resposta, parse_mode='Markdown')
 
 
-# --- 5. PROCESSADOR DE ÁUDIO ---
+# --- 5. PROCESSADOR DE ÁUDIO REPETIDO COM IA ---
 async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
   await update.message.reply_text(
       '🎧 *Ouvindo e analisando relato com IA...*', parse_mode='Markdown'
   )
 
+  oga_path = 'voice.oga'
   try:
     voice_file = await context.bot.get_file(update.message.voice.file_id)
-    oga_path = 'voice.oga'
-
     await voice_file.download_to_drive(oga_path)
 
-    recognizer = sr.Recognizer()
-    with sr.AudioFile(oga_path) as source:
-      audio_data = recognizer.record(source)
-      texto_transcrito = recognizer.recognize_google(
-          audio_data, language='pt-BR'
-      )
-
-    if os.path.exists(oga_path):
-      os.remove(oga_path)
-
-    bairro, rua, risco_str, horario_critico, detalhes = extrair_dados_com_ia(
-        texto_transcrito
-    )
+    (
+        bairro,
+        rua,
+        risco_str,
+        horario_critico,
+        detalhes,
+        texto_transcrito,
+    ) = processar_relato_com_groq(oga_path)
 
     if not bairro or bairro.lower() in [
         'não informado',
@@ -254,10 +264,12 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
       risco = int(risco_str)
     except (ValueError, TypeError):
-      risco = 3 if '3' in texto_transcrito else 2
+      risco = 3
 
     if not detalhes:
-      detalhes = texto_transcrito
+      detalhes = (
+          texto_transcrito if texto_transcrito else 'Relato de risco registrado'
+      )
 
     # Salva no Banco de Dados
     conn = sqlite3.connect('banco_risco.db')
@@ -282,7 +294,7 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f'📍 *Bairro:* {bairro}\n'
         f'🛣️ *Local/Rua:* {rua}\n'
         f'⏰ *Horário Crítico:* {horario_critico}\n'
-        f'⚠️ *Nível de Risco:* {risco}\n'
+        f'⚠️️ *Nível de Risco:* {risco}\n'
         f'📝 *Detalhes:* {detalhes}'
     )
 
@@ -297,8 +309,11 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
   except Exception as e:
     logging.error(f'Erro no processamento de áudio: {e}')
     await update.message.reply_text(
-        '❌ Não foi possível reconhecer o áudio. Tente enviar novamente ou digite o comando.'
+        '❌ Não foi possível processar o áudio. Tente enviar novamente.'
     )
+  finally:
+    if os.path.exists(oga_path):
+      os.remove(oga_path)
 
 
 # --- 6. EXECUÇÃO DO BOT ---
