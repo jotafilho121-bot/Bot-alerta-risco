@@ -1,5 +1,4 @@
 python-telegram-bot
 groq
-gTTS
+edge-tts
 flask
-gunicorn
