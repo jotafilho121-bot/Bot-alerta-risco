@@ -1,12 +1,13 @@
 import asyncio
+import io
 import logging
 import os
 import sqlite3
 import threading
 import edge_tts
-import requests
 from flask import Flask
 from groq import Groq
+import requests
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -48,7 +49,7 @@ def iniciar_banco():
         ''')
     conn.commit()
     conn.close()
-    logging.info('Banco de dados inicializado.')
+    logging.info('Banco de dados operacional.')
   except Exception as e:
     logging.error(f'Erro no banco: {e}')
 
@@ -77,7 +78,7 @@ def obter_endereco_gps(lat, lon):
       return bairro, rua
   except Exception as e:
     logging.error(f'Erro no geocoding: {e}')
-  return 'Região da Localização Enviada', 'Vias de Acesso'
+  return 'Região do GPS enviado', 'Vias de Acesso'
 
 
 # --- VOZ NEURAL HUMANA ---
@@ -112,7 +113,7 @@ async def enviar_resposta_em_audio(
         pass
 
 
-# --- MOTOR DE INTELIGÊNCIA ARTIFICIAL (TEXTO/ÁUDIO) ---
+# --- IA PROCESSAMENTO DE INTENÇÃO ---
 def analisar_mensagem_com_groq(texto_entrada, contexto_gps=''):
   groq_api_key = os.environ.get('GROQ_API_KEY')
   if not groq_api_key:
@@ -122,10 +123,10 @@ def analisar_mensagem_com_groq(texto_entrada, contexto_gps=''):
 
   prompt = f"""
     Voce e um assistente de risco viario para entregadores em Nova Iguacu e Baixada Fluminense.
-    Analise a mensagem abaixo recebida por texto ou transcricao de audio.
+    Analise a mensagem recebida.
 
     {contexto_gps}
-    Mensagem recebida: "{texto_entrada}"
+    Mensagem do usuario: "{texto_entrada}"
 
     A intencao do usuario e CONSULTAR (perguntar sobre seguranca) ou CADASTRAR (relatar risco/assalto/perigo)?
 
@@ -139,9 +140,8 @@ def analisar_mensagem_com_groq(texto_entrada, contexto_gps=''):
 
     Regras para Cadastro:
     - RISCO: 1=Baixo, 2=Medio, 3=Alto/Critico.
-    - Se o usuario disser "aqui", "nesta rua" ou "este local" e houver informacao de GPS no contexto, USE o bairro e rua do GPS.
-    - Se nao souber a rua exata, coloque "Vias do Bairro".
-    - Resumo claro, objetivo e neutro.
+    - Se o usuario mencionar localizacao atual ou mandar coordenadas, use o bairro/rua informados no contexto.
+    - Resumo objetivo, sem girias.
     """
 
   try:
@@ -153,23 +153,23 @@ def analisar_mensagem_com_groq(texto_entrada, contexto_gps=''):
     partes = [p.strip() for p in resultado.split('|')]
     return partes
   except Exception as e:
-    logging.error(f'Erro na chamada Groq: {e}')
+    logging.error(f'Erro no Groq LLM: {e}')
     return 'ERRO', str(e), None, None, None, None
 
 
-# --- HANDLERS DO TELEGRAM ---
+# --- HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
   msg = (
-      '🚨 *Bot de Mapeamento de Risco (Híbrido)*\n\n'
+      '🚨 *Bot de Mapeamento de Risco*\n\n'
       'Você pode interagir enviando *Texto*, *Áudio* ou *Localização GPS*:\n\n'
-      '🔹 *Consulta:* Digite ou fale ex: _"Como tá a Rua Menezes de Avellar?"_\n'
+      '🔹 *Consulta:* Digite ou fale ex: _"Rua Rocha Faria, bairro Grama,"_\n'
       '🔹 *Cadastro:* Digite ou fale ex: _"Assalto recente no Austin perto do'
       ' posto, risco alto"_\n'
-      '📍 *GPS:* Envie sua localização atual para vincular aos relatos ou'
-      ' consultas.\n\n'
+      '📍 *GPS:* Envie sua localização ao vivo ou ponto no mapa para'
+      ' vincular.\n\n'
       'Comandos diretos:\n'
       '• `/consultar [bairro ou rua]`\n'
-      '• `/listar` - Exibe últimos alertas'
+      '• `/listar` - Exibe os últimos alertas'
   )
   await update.message.reply_text(msg, parse_mode='Markdown')
 
@@ -191,8 +191,8 @@ async def receber_localizacao(
       f'📍 *Localização Identificada!*\n\n'
       f'• *Bairro:* {bairro}\n'
       f'• *Rua/Referência:* {rua}\n\n'
-      'Agora escreva uma mensagem ou mande um áudio relatando o risco ou'
-      ' fazendo uma consulta sobre este local.'
+      'Agora envie uma mensagem ou áudio relatando o risco ou fazendo uma'
+      ' consulta.'
   )
   await update.message.reply_text(msg, parse_mode='Markdown')
 
@@ -200,26 +200,28 @@ async def receber_localizacao(
 async def processar_mensagem(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-  # Identifica se é áudio ou texto digitado
-  if update.message.voice:
+  eh_audio = bool(update.message.voice)
+
+  if eh_audio:
     await update.message.reply_text(
         '🎧 *Ouvindo áudio...*', parse_mode='Markdown'
     )
-    oga_path = f'voice_{update.effective_chat.id}.oga'
     try:
-      voice_file = await context.bot.get_file(update.message.voice.file_id)
-      await voice_file.download_to_drive(oga_path)
-
-      # Transcrição Whisper Groq
       groq_api_key = os.environ.get('GROQ_API_KEY')
       client = Groq(api_key=groq_api_key)
-      with open(oga_path, 'rb') as file:
-        transcription = client.audio.transcriptions.create(
-            file=(oga_path, file.read()),
-            model='whisper-large-v3-turbo',
-            language='pt',
-            response_format='text',
-        )
+
+      # Baixa o arquivo direto na memória para evitar problemas no arquivo do disco
+      voice_file = await context.bot.get_file(update.message.voice.file_id)
+      byte_array = await voice_file.download_as_bytearray()
+      audio_bytes = io.BytesIO(byte_array)
+      audio_bytes.name = 'voice.oga'
+
+      transcription = client.audio.transcriptions.create(
+          file=(audio_bytes.name, audio_bytes.read()),
+          model='whisper-large-v3-turbo',
+          language='pt',
+          response_format='text',
+      )
       texto_entrada = str(transcription).strip()
     except Exception as e:
       logging.error(f'Erro na transcrição de áudio: {e}')
@@ -227,24 +229,16 @@ async def processar_mensagem(
           '❌ Erro ao processar o áudio. Tente novamente.'
       )
       return
-    finally:
-      if os.path.exists(oga_path):
-        try:
-          os.remove(oga_path)
-        except Exception:
-          pass
   else:
     texto_entrada = update.message.text.strip()
 
-  # Contexto do GPS
   contexto_gps = ''
   if 'bairro' in context.user_data and 'rua' in context.user_data:
     contexto_gps = (
-        f"O usuário compartilhou GPS localizad em: Bairro"
+        f"O usuário enviou GPS localizado em: Bairro"
         f" '{context.user_data['bairro']}', Rua '{context.user_data['rua']}'."
     )
 
-  # Chama o motor da Groq
   dados = analisar_mensagem_com_groq(texto_entrada, contexto_gps)
   tipo_acao = dados[0]
 
@@ -264,7 +258,7 @@ async def processar_mensagem(
     if not resultados:
       msg = f'✅ Nenhum alerta de risco registrado para *{termo_busca}*.'
       await update.message.reply_text(msg, parse_mode='Markdown')
-      if update.message.voice:
+      if eh_audio:
         await enviar_resposta_em_audio(
             update, context, f'Nenhum alerta cadastrado para {termo_busca}.'
         )
@@ -282,9 +276,7 @@ async def processar_mensagem(
       texto_audio += f'No bairro {bairro}, rua {rua}, risco nível {risco}. Detalhes: {detalhes}. '
 
     await update.message.reply_text(resposta_texto, parse_mode='Markdown')
-
-    # Envia áudio se a pergunta tiver sido por áudio
-    if update.message.voice:
+    if eh_audio:
       await enviar_resposta_em_audio(update, context, texto_audio)
 
   elif tipo_acao == 'CADASTRO' and len(dados) >= 6:
@@ -310,13 +302,13 @@ async def processar_mensagem(
         f'📍 *Bairro:* {bairro}\n'
         f'🛣️ *Rua/Local:* {rua}\n'
         f'⏰ *Horário Crítico:* {horario_critico}\n'
-        f'⚠️️ *Nível de Risco:* {risco}\n'
+        f'⚠ *Nível de Risco:* {risco}\n'
         f'📝 *Detalhes:* {detalhes}'
     )
 
     await update.message.reply_text(msg_sucesso, parse_mode='Markdown')
 
-    if update.message.voice:
+    if eh_audio:
       fala_confirmacao = (
           f'Alerta salvo com sucesso. Bairro {bairro}, local {rua}. Nível de'
           f' risco {risco}.'
@@ -325,8 +317,8 @@ async def processar_mensagem(
 
   else:
     await update.message.reply_text(
-        '⚠️ Não entendi a mensagem. Você pode enviar uma pergunta ou um relato'
-        ' citando o bairro/rua por texto ou áudio.'
+        '⚠️ Não entendi a mensagem. Envie o nome do bairro ou rua para'
+        ' consultar ou relatar um risco.'
     )
 
 
@@ -405,7 +397,6 @@ def rodar_bot():
 
   app_bot = ApplicationBuilder().token(telegram_token).build()
 
-  # Evita travamento por exceções
   app_bot.add_error_handler(lidar_com_erros)
 
   loop.run_until_complete(
@@ -417,12 +408,9 @@ def rodar_bot():
   app_bot.add_handler(CommandHandler('listar', listar_cmd))
   app_bot.add_handler(MessageHandler(filters.LOCATION, receber_localizacao))
 
-  # Handler unificado para Texto e Áudio
-  app_bot.add_handler(
-      MessageHandler(
-          filters.TEXT | filters.VOICE & ~filters.COMMAND, processar_mensagem
-      )
-  )
+  # Filtro estrito: captura TEXTO (que não seja comando) OU ÁUDIO
+  filtro_mensagens = (filters.TEXT & ~filters.COMMAND) | filters.VOICE
+  app_bot.add_handler(MessageHandler(filtro_mensagens, processar_mensagem))
 
   logging.info('Polling ativo no modo Híbrido!')
   app_bot.run_polling(drop_pending_updates=True, stop_signals=None)
