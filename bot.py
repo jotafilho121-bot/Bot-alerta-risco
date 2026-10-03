@@ -4,6 +4,7 @@ import sqlite3
 from threading import Thread
 from flask import Flask
 from groq import Groq
+from gtts import gTTS
 from pydub import AudioSegment
 import speech_recognition as sr
 from telegram import Update
@@ -21,7 +22,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-  return 'Bot de Mapeamento de Risco (IA Groq) esta Online!'
+  return 'Bot de Mapeamento de Risco (Voz + IA) esta Online!'
 
 
 def run_web():
@@ -59,6 +60,34 @@ def iniciar_banco():
   conn.close()
 
 
+# --- FUNÇÃO AUXILIAR: GERAR E ENVIAR ÁUDIO DE RESPOSTA ---
+async def enviar_resposta_em_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, texto_resposta: str):
+  try:
+    caminho_resposta_mp3 = 'resposta.mp3'
+    caminho_resposta_ogg = 'resposta.ogg'
+
+    # Converte o texto da IA em fala
+    tts = gTTS(text=texto_resposta, lang='pt', tld='com.br')
+    tts.save(caminho_resposta_mp3)
+
+    # Converte MP3 para OGG (formato oficial de nota de voz do Telegram)
+    audio = AudioSegment.from_mp3(caminho_resposta_mp3)
+    audio.export(caminho_resposta_ogg, format='ogg', codec='libopus')
+
+    # Envia a nota de voz no Telegram
+    with open(caminho_resposta_ogg, 'rb') as voice_file:
+      await context.bot.send_voice(chat_id=update.effective_chat.id, voice=voice_file)
+
+    # Limpa arquivos de áudio temporários
+    if os.path.exists(caminho_resposta_mp3):
+      os.remove(caminho_resposta_mp3)
+    if os.path.exists(caminho_resposta_ogg):
+      os.remove(caminho_resposta_ogg)
+
+  except Exception as e:
+    logging.error(f'Erro ao gerar ou enviar áudio de resposta: {e}')
+
+
 # --- 3. PROCESSAMENTO INTELIGENTE COM IA (GROQ / LLAMA 3) ---
 def extrair_dados_com_ia(texto_transcrito):
   groq_api_key = os.environ.get('GROQ_API_KEY')
@@ -79,8 +108,8 @@ def extrair_dados_com_ia(texto_transcrito):
     BAIRRO | RUA | RISCO | HORARIO_CRITICO | DETALHES
 
     Regras:
-    - BAIRRO: Nome do bairro citado (Ex: Jardim Geneciano, Grama, Austin, Ambai). Se o usuario citou cidade ou bairro, extraia o bairro.
-    - RUA: Nome da rua/avenida citada. Se o relato for sobre o bairro inteiro ou nao citar rua, escreva obrigatoriamente "Todo o Bairro / Vias de Acesso".
+    - BAIRRO: Nome do bairro citado (Ex: Jardim Geneciano, Grama, Austin, Ambai).
+    - RUA: Nome da rua/avenida citada. Se o relato for sobre o bairro inteiro ou nao citar rua, escreva "Todo o Bairro / Vias de Acesso".
     - RISCO: Um numero simples (1, 2 ou 3). 1=Baixo, 2=Medio, 3=Alto/Critico.
     - HORARIO_CRITICO: Periodo citado (Ex: "Apos 17h", "A noite", "Dia e Noite").
     - DETALHES: Breve resumo neutro e direto sem usar gírias perigosas nem nomes de faccoes.
@@ -111,11 +140,9 @@ def extrair_dados_com_ia(texto_transcrito):
 # --- 4. COMANDOS DO TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
   msg = (
-      '🚨 *Bot de Mapeamento de Risco*\n\n'
-      '🎙️ *Como cadastrar por Áudio:* Envie um áudio falando o local e o'
-      ' risco!\n'
-      ' Exemplo: *"Atenção no Jardim Geneciano, área de risco 3 a partir das 5'
-      ' da tarde."*\n\n'
+      '🚨 *Bot de Mapeamento de Risco com Resposta em Voz*\n\n'
+      '🎙️ *Como cadastrar por Áudio:* Envie um áudio com o local e o risco!\n'
+      ' Exemplo: *"Atenção na Rocha Farias no Bairro da Grama, área de risco 3 a partir das 6 da tarde."*\n\n'
       'Comandos por texto:\n'
       '🔹 `/consultar [bairro ou rua]`\n'
       '🔹 `/listar` - Exibe os últimos alertas'
@@ -143,12 +170,14 @@ async def consultar(update: Update, context: ContextTypes.DEFAULT_TYPE):
   conn.close()
 
   if not resultados:
-    await update.message.reply_text(
-        f'✅ Nenhum alerta cadastrado para: *{termo}*', parse_mode='Markdown'
-    )
+    msg_no = f'Nenhum alerta cadastrado para {termo}.'
+    await update.message.reply_text(f'✅ {msg_no}')
+    await enviar_resposta_em_audio(update, context, msg_no)
     return
 
-  resposta = f"🔍 *Alertas encontrados para '{termo}':*\n\n"
+  resposta = f"🔍 Alertas encontrados para {termo}:\n\n"
+  texto_fala = f"Alertas encontrados para {termo}. "
+
   for item in resultados:
     bairro, rua, risco, horario, detalhes = item
     resposta += (
@@ -159,8 +188,10 @@ async def consultar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f'📝 *Detalhes:* {detalhes}\n'
         '------------------------\n'
     )
+    texto_fala += f"No bairro {bairro}, local {rua}, risco nível {risco}. Horário crítico: {horario}. Detalhes: {detalhes}. "
 
   await update.message.reply_text(resposta, parse_mode='Markdown')
+  await enviar_resposta_em_audio(update, context, texto_fala)
 
 
 async def listar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -187,9 +218,9 @@ async def listar(update: Update, context: ContextTypes.DEFAULT_TYPE):
   await update.message.reply_text(resposta, parse_mode='Markdown')
 
 
-# --- 5. PROCESSADOR DE ÁUDIO ---
+# --- 5. PROCESSADOR DE ÁUDIO COM RESPOSTA EM VOZ ---
 async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-  msg_espera = await update.message.reply_text(
+  await update.message.reply_text(
       '🎧 *Ouvindo e analisando relato com IA...*', parse_mode='Markdown'
   )
 
@@ -219,12 +250,7 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         texto_transcrito
     )
 
-    # Se a IA não conseguiu extrair em 5 partes, define padrão baseado no texto
-    if not bairro or bairro.lower() in [
-        'não informado',
-        'nao informado',
-        'none',
-    ]:
+    if not bairro or bairro.lower() in ['não informado', 'nao informado', 'none']:
       bairro = 'Bairro Identificado no Relato'
 
     if not rua or rua.lower() in ['não informado', 'nao informado', 'none']:
@@ -267,7 +293,15 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f'⚠️ *Nível de Risco:* {risco}\n'
         f'📝 *Detalhes:* {detalhes}'
     )
+
+    fala_confirmacao = (
+        f'Alerta salvo com sucesso. Bairro {bairro}, local {rua}. '
+        f'Nível de risco {risco}. Horário crítico: {horario_critico}.'
+    )
+
     await update.message.reply_text(msg_sucesso, parse_mode='Markdown')
+    # Responde de volta gravando um áudio no Telegram
+    await enviar_resposta_em_audio(update, context, fala_confirmacao)
 
   except Exception as e:
     logging.error(f'Erro no processamento de áudio: {e}')
@@ -292,5 +326,5 @@ if __name__ == '__main__':
   app_bot.add_handler(CommandHandler('listar', listar))
   app_bot.add_handler(MessageHandler(filters.VOICE, processar_audio))
 
-  print('Bot de Mapeamento Rodando...')
+  print('Bot de Mapeamento com Voz de Resposta Rodando...')
   app_bot.run_polling()
