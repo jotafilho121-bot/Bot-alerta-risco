@@ -2,3 +2,4 @@ python-telegram-bot
 groq
 edge-tts
 flask
+requests
