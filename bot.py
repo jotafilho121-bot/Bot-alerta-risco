@@ -4,14 +4,16 @@ import logging
 from threading import Thread
 from flask import Flask
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+import speech_recognition as sr
+from pydub import AudioSegment
 
-# --- 1. MINI SERVIDOR WEB (Para manter o Render ativo de graça) ---
+# --- 1. MINI SERVIDOR WEB (Manter Render Ativo de Graça) ---
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot de Mapeamento de Risco está Online!"
+    return "Bot de Mapeamento de Risco (Voz Ativa) está Online!"
 
 def run_web():
     port = int(os.environ.get('PORT', 8080))
@@ -45,16 +47,16 @@ def iniciar_banco():
     conn.commit()
     conn.close()
 
-# --- 3. COMANDOS DO BOT TELEGRAM ---
+# --- 3. COMANDOS POR TEXTO ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "🚨 *Bot de Mapeamento de Risco Ativo*\n\n"
-        "Comandos disponíveis:\n"
-        "🔹 `/consultar [nome da rua ou bairro]` - Busca alertas salvos\n"
-        "🔹 `/cadastrar [Bairro] - [Rua] - [Risco 1 a 3] - [Detalhes]` - Adiciona nova rua\n"
-        "🔹 `/listar` - Exibe os últimos 10 cadastros\n\n"
-        "Exemplo de cadastro:\n"
-        "`/cadastrar Miguel Couto - Rua Dagmar - 3 - Assalto a moto à noite`"
+        "🎙️ *NOVO:* Agora você pode me enviar um **ÁUDIO DE VOZ** para cadastrar!\n"
+        "Exemplo de áudio: *'Cadastrar Miguel Couto - Rua Dagmar - Risco 3 - Assalto à noite'*\n\n"
+        "Comandos por texto:\n"
+        "🔹 `/consultar [nome da rua ou bairro]`\n"
+        "🔹 `/cadastrar [Bairro] - [Rua] - [Risco 1 a 3] - [Detalhes]`\n"
+        "🔹 `/listar` - Exibe os últimos cadastros"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -92,23 +94,20 @@ async def consultar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cadastrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = " ".join(context.args)
-    partes = [p.strip() for p in texto.split("-")]
+    processar_e_salvar(texto, update)
+
+def processar_e_salvar(texto_bruto, update_or_msg):
+    partes = [p.strip() for p in texto_bruto.split("-")]
 
     if len(partes) < 4:
-        await update.message.reply_text(
-            "⚠️ Formato incorreto!\nUse: `/cadastrar [Bairro] - [Rua] - [Risco 1-3] - [Detalhes]`\n\n"
-            "Exemplo:\n`/cadastrar Posse - Rua das Flores - 2 - Evitar parar no sinal à noite`",
-            parse_mode="Markdown"
-        )
-        return
+        return False, "⚠️ Formato incorreto!\nUse: `Bairro - Rua - Risco - Detalhes`"
 
     bairro, rua, risco_str, detalhes = partes[0], partes[1], partes[2], partes[3]
 
     try:
         risco = int(risco_str)
     except ValueError:
-        await update.message.reply_text("⚠️ O nível de risco precisa ser um número (1, 2 ou 3).")
-        return
+        return False, "⚠️ O nível de risco precisa ser um número (1, 2 ou 3)."
 
     conn = sqlite3.connect("banco_risco.db")
     cursor = conn.cursor()
@@ -119,7 +118,7 @@ async def cadastrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await update.message.reply_text(f"✅ *Alerta salvo com sucesso!*\n📍 {rua} ({bairro}) - Risco {risco}", parse_mode="Markdown")
+    return True, f"✅ *Alerta salvo com sucesso!*\n📍 {rua} ({bairro}) - Risco {risco}\n📝 {detalhes}"
 
 async def listar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect("banco_risco.db")
@@ -139,20 +138,64 @@ async def listar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(resposta, parse_mode="Markdown")
 
-# --- 4. EXECUÇÃO DOS SERVIÇOS ---
-if __name__ == '__main__':
-    # Inicia o servidor Web leve em segundo plano
-    keep_alive()
+# --- 4. PROCESSADOR DE MENSAGEM DE VOZ ---
+async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg_espera = await update.message.reply_text("🎧 *Processando áudio de voz... Aguarde!*", parse_mode="Markdown")
     
-    # Inicia o banco de dados
+    try:
+        # Baixa o arquivo de áudio do Telegram
+        voice_file = await context.bot.get_file(update.message.voice.file_id)
+        oga_path = "voice.oga"
+        wav_path = "voice.wav"
+        
+        await voice_file.download_to_drive(oga_path)
+
+        # Converte OGA para WAV
+        sound = AudioSegment.from_file(oga_path)
+        sound.export(wav_path, format="wav")
+
+        # Reconhecimento de Fala
+        recognizer = sr.Recognizer()
+        with sr.AudioFile(wav_path) as source:
+            audio_data = recognizer.record(source)
+            texto_transcrito = recognizer.recognize_google(audio_data, language="pt-BR")
+
+        # Limpa arquivos temporários
+        if os.path.exists(oga_path): os.remove(oga_path)
+        if os.path.exists(wav_path): os.remove(wav_path)
+
+        # Envia transcrição para o usuário
+        await update.message.reply_text(f"🗣️ *Você falou:* \"_{texto_transcrito}_\"", parse_mode="Markdown")
+
+        # Tenta cadastrar se contiver o padrão com separadores
+        if "-" in texto_transcrito:
+            sucesso, resposta = processar_e_salvar(texto_transcrito, update)
+            await update.message.reply_text(resposta, parse_mode="Markdown")
+        else:
+            await update.message.reply_text(
+                "💡 Para cadastrar por voz, fale com pausas ou diga a palavra hífen/traço entre as informações.\n"
+                "Exemplo: *Posse traço Rua das Flores traço 2 traço Cuidado com o sinal*",
+                parse_mode="Markdown"
+            )
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Não consegui entender o áudio com clareza. Tente falar novamente em um ambiente mais silencioso.")
+
+# --- 5. EXECUÇÃO DO BOT ---
+if __name__ == '__main__':
+    keep_alive()
     iniciar_banco()
     
-    # Inicia o Bot do Telegram
     app_bot = ApplicationBuilder().token(TOKEN).build()
+    
+    # Handlers
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(CommandHandler("consultar", consultar))
     app_bot.add_handler(CommandHandler("cadastrar", cadastrar))
     app_bot.add_handler(CommandHandler("listar", listar))
+    
+    # Escuta mensagens de voz
+    app_bot.add_handler(MessageHandler(filters.VOICE, processar_audio))
 
-    print("Bot e Servidor Web rodando...")
+    print("Bot com suporte à voz rodando...")
     app_bot.run_polling()
