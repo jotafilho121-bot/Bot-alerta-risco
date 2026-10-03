@@ -5,7 +5,6 @@ from threading import Thread
 from flask import Flask
 from groq import Groq
 from gtts import gTTS
-from pydub import AudioSegment
 import speech_recognition as sr
 from telegram import Update
 from telegram.ext import (
@@ -16,13 +15,13 @@ from telegram.ext import (
     filters,
 )
 
-# --- 1. MINI SERVIDOR WEB ---
+# --- 1. SERVIDOR WEB PARA MANTER ONLINE ---
 app = Flask('')
 
 
 @app.route('/')
 def home():
-  return 'Bot de Mapeamento de Risco (Voz + IA) esta Online!'
+  return 'Bot de Mapeamento de Risco esta Online e Ativo!'
 
 
 def run_web():
@@ -60,33 +59,29 @@ def iniciar_banco():
   conn.close()
 
 
-# --- FUNÇÃO AUXILIAR: GERAR E ENVIAR ÁUDIO DE RESPOSTA ---
+# --- FUNÇÃO AUXILIAR: ENVIAR ÁUDIO DE RESPOSTA ---
 async def enviar_resposta_em_audio(
     update: Update, context: ContextTypes.DEFAULT_TYPE, texto_resposta: str
 ):
   caminho_mp3 = 'resposta.mp3'
   try:
-    # Gera o arquivo de voz em MP3
     tts = gTTS(text=texto_resposta, lang='pt', tld='com.br')
     tts.save(caminho_mp3)
 
-    # Envia o arquivo de áudio diretamente para o chat do Telegram
     with open(caminho_mp3, 'rb') as audio_file:
       await context.bot.send_audio(
           chat_id=update.effective_chat.id,
           audio=audio_file,
           title='Alerta de Segurança',
       )
-
   except Exception as e:
-    logging.error(f'Erro ao gerar/enviar resposta em audio: {e}')
-
+    logging.error(f'Erro ao gerar audio de resposta: {e}')
   finally:
     if os.path.exists(caminho_mp3):
       os.remove(caminho_mp3)
 
 
-# --- 3. PROCESSAMENTO INTELIGENTE COM IA (GROQ / LLAMA 3) ---
+# --- 3. PROCESSAMENTO INTELIGENTE COM IA (GROQ) ---
 def extrair_dados_com_ia(texto_transcrito):
   groq_api_key = os.environ.get('GROQ_API_KEY')
 
@@ -110,7 +105,7 @@ def extrair_dados_com_ia(texto_transcrito):
     - RUA: Nome da rua/avenida citada. Se o relato for sobre o bairro inteiro ou nao citar rua, escreva "Todo o Bairro / Vias de Acesso".
     - RISCO: Um numero simples (1, 2 ou 3). 1=Baixo, 2=Medio, 3=Alto/Critico.
     - HORARIO_CRITICO: Periodo citado (Ex: "Apos 17h", "A noite", "Dia e Noite").
-    - DETALHES: Breve resumo neutro e direto sem usar gírias perigosas nem nomes de faccoes.
+    - DETALHES: Breve resumo neutro e direto sem usar girias nem nomes de faccoes.
 
     Exemplo de Saida:
     Jardim Geneciano | Todo o Bairro / Vias de Acesso | 3 | Apos 17h | Atencao elevada nas vias de acesso no periodo noturno.
@@ -180,9 +175,9 @@ async def consultar(update: Update, context: ContextTypes.DEFAULT_TYPE):
   for item in resultados:
     bairro, rua, risco, horario, detalhes = item
     resposta += (
-        f'⚠️️ *Risco Nível {risco}*\n'
+        f'⚠️ *Risco Nível {risco}*\n'
         f'📍 *Bairro:* {bairro}\n'
-        f'🛣️ *Local/Rua:* {rua}\n'
+        f'🛣️️ *Local/Rua:* {rua}\n'
         f'⏰ *Horário Crítico:* {horario}\n'
         f'📝 *Detalhes:* {detalhes}\n'
         '------------------------\n'
@@ -217,7 +212,7 @@ async def listar(update: Update, context: ContextTypes.DEFAULT_TYPE):
   await update.message.reply_text(resposta, parse_mode='Markdown')
 
 
-# --- 5. PROCESSADOR DE ÁUDIO COM RESPOSTA EM VOZ ---
+# --- 5. PROCESSADOR DE ÁUDIO ---
 async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
   await update.message.reply_text(
       '🎧 *Ouvindo e analisando relato com IA...*', parse_mode='Markdown'
@@ -226,15 +221,11 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
   try:
     voice_file = await context.bot.get_file(update.message.voice.file_id)
     oga_path = 'voice.oga'
-    wav_path = 'voice.wav'
 
     await voice_file.download_to_drive(oga_path)
 
-    sound = AudioSegment.from_file(oga_path)
-    sound.export(wav_path, format='wav')
-
     recognizer = sr.Recognizer()
-    with sr.AudioFile(wav_path) as source:
+    with sr.AudioFile(oga_path) as source:
       audio_data = recognizer.record(source)
       texto_transcrito = recognizer.recognize_google(
           audio_data, language='pt-BR'
@@ -242,8 +233,6 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if os.path.exists(oga_path):
       os.remove(oga_path)
-    if os.path.exists(wav_path):
-      os.remove(wav_path)
 
     bairro, rua, risco_str, horario_critico, detalhes = extrair_dados_com_ia(
         texto_transcrito
@@ -303,13 +292,12 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(msg_sucesso, parse_mode='Markdown')
-    # Responde de volta gravando um áudio no Telegram
     await enviar_resposta_em_audio(update, context, fala_confirmacao)
 
   except Exception as e:
     logging.error(f'Erro no processamento de áudio: {e}')
     await update.message.reply_text(
-        '❌ Erro ao processar o áudio. Tente novamente.'
+        '❌ Não foi possível reconhecer o áudio. Tente enviar novamente ou digite o comando.'
     )
 
 
@@ -329,5 +317,5 @@ if __name__ == '__main__':
   app_bot.add_handler(CommandHandler('listar', listar))
   app_bot.add_handler(MessageHandler(filters.VOICE, processar_audio))
 
-  print('Bot de Mapeamento com Voz de Resposta Rodando...')
+  print('Bot de Mapeamento Rodando...')
   app_bot.run_polling()
