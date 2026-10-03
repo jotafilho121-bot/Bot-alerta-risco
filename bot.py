@@ -15,13 +15,13 @@ from telegram.ext import (
     filters,
 )
 
-# --- 1. MINI SERVIDOR WEB (Manter Render Ativo) ---
+# --- 1. MINI SERVIDOR WEB ---
 app = Flask('')
 
 
 @app.route('/')
 def home():
-  return 'Bot de Mapeamento de Risco (IA Groq Ativa) está Online!'
+  return 'Bot de Mapeamento de Risco (IA Groq) esta Online!'
 
 
 def run_web():
@@ -64,40 +64,31 @@ def extrair_dados_com_ia(texto_transcrito):
   groq_api_key = os.environ.get('GROQ_API_KEY')
 
   if not groq_api_key:
-    logging.error('ERRO: A variável GROQ_API_KEY não foi encontrada.')
+    logging.error('ERRO: A variavel GROQ_API_KEY nao foi encontrada.')
     return None, None, None, None, None
 
   client_groq = Groq(api_key=groq_api_key)
 
   prompt = f"""
-    Você é um assistente especialista em analisar relatos de segurança e logística de entregas na Baixada Fluminense.
-    Analise o texto dito pelo entregador e extraia as informações de localização, nível de risco e restrições de horário.
+    Voce e um assistente especializado em mapeamento de risco viario para entregadores em Nova Iguacu e Baixada Fluminense.
+    Analise a transcricao da fala do entregador e extraia os dados.
 
     Texto falado: "{texto_transcrito}"
 
-    Retorne APENAS no formato exato separado por barras verticais "|":
+    Formato de resposta OBRIGATORIO (separado estritamente por |):
     BAIRRO | RUA | RISCO | HORARIO_CRITICO | DETALHES
 
-    Regras de Interpretação:
-    1. BAIRRO: Identifique o bairro ou região (Ex: Jardim Geneciano, Grama, Anbaí). Se não disser, use "Não informado".
-    2. RUA:
-       - Se o relato se referir ao bairro como um todo (Ex: "o bairro todo tá perigoso", "no Geneciano inteiro"), coloque "Todo o Bairro / Vias de Acesso".
-       - Se citar uma rua/avenida específica (Ex: Av. Nazaré, Rua Rocha Farias), coloque o nome da rua.
-       - Se não citar rua nem indicar o bairro todo, use "Não informado".
-    3. RISCO:
-       - Nível 1 (Baixo): Iluminação ruim, atenção leve.
-       - Nível 2 (Médio): Furtos, histórico de assalto, atenção moderada.
-       - Nível 3 (Alto): Área vermelha, presença de grupo armado, risco elevado de assalto a moto, restrição severa de circulação.
-    4. HORARIO_CRITICO: Extraia qualquer menção a janelas de horário ou períodos do dia (Ex: "Após 17h", "À noite", "Qualquer horário", "Após 21h"). Se não citar, use "Dia e Noite".
-    5. DETALHES: Resuma em uma frase curta os principais alertas (Ex: "Atenção reforçada após o pôr do sol", "Guerra de facções / risco de assalto a moto", "Exige atenção total nas vias de acesso").
+    Regras:
+    - BAIRRO: Nome do bairro citado (Ex: Jardim Geneciano, Grama, Austin, Ambai). Se o usuario citou cidade ou bairro, extraia o bairro.
+    - RUA: Nome da rua/avenida citada. Se o relato for sobre o bairro inteiro ou nao citar rua, escreva obrigatoriamente "Todo o Bairro / Vias de Acesso".
+    - RISCO: Um numero simples (1, 2 ou 3). 1=Baixo, 2=Medio, 3=Alto/Critico.
+    - HORARIO_CRITICO: Periodo citado (Ex: "Apos 17h", "A noite", "Dia e Noite").
+    - DETALHES: Breve resumo neutro e direto sem usar gírias perigosas nem nomes de faccoes.
 
-    Exemplo 1 (Bairro Todo):
-    Jardim Geneciano | Todo o Bairro / Vias de Acesso | 3 | Após 17h | Risco alto de assalto e movimentação armada nas vias internas à noite.
+    Exemplo de Saida:
+    Jardim Geneciano | Todo o Bairro / Vias de Acesso | 3 | Apos 17h | Atencao elevada nas vias de acesso no periodo noturno.
 
-    Exemplo 2 (Rua Específica):
-    Grama | Rua Rocha Farias | 3 | À noite | Ponto crítico de assalto a motociclistas.
-
-    Responda APENAS a linha formatada com as barras verticais.
+    Retorne APENAS a linha no formato indicado.
     """
 
   try:
@@ -120,14 +111,13 @@ def extrair_dados_com_ia(texto_transcrito):
 # --- 4. COMANDOS DO TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
   msg = (
-      '🚨 *Bot de Mapeamento de Risco (Baixada Fluminense)*\n\n'
-      '🎙️ *Como cadastrar por Áudio:* Grave um áudio falando naturalmente!\n'
-      ' Exemplo 1: *"Atenção rapaziada, o bairro do Geneciano todo tá'
-      ' perigoso, depois das 5 da tarde o risco de assalto é alto."*\n'
-      ' Exemplo 2: *"Cuidado na Av. Nazaré à noite, ponto crítico de assalto'
-      ' a moto."*\n\n'
+      '🚨 *Bot de Mapeamento de Risco*\n\n'
+      '🎙️ *Como cadastrar por Áudio:* Envie um áudio falando o local e o'
+      ' risco!\n'
+      ' Exemplo: *"Atenção no Jardim Geneciano, área de risco 3 a partir das 5'
+      ' da tarde."*\n\n'
       'Comandos por texto:\n'
-      '🔹 `/consultar [nome da rua ou bairro]`\n'
+      '🔹 `/consultar [bairro ou rua]`\n'
       '🔹 `/listar` - Exibe os últimos alertas'
   )
   await update.message.reply_text(msg, parse_mode='Markdown')
@@ -144,7 +134,6 @@ async def consultar(update: Update, context: ContextTypes.DEFAULT_TYPE):
   conn = sqlite3.connect('banco_risco.db')
   cursor = conn.cursor()
 
-  # Busca por bairro ou rua
   cursor.execute(
       'SELECT bairro, rua, risco, horario_critico, detalhes FROM alertas WHERE'
       ' rua LIKE ? OR bairro LIKE ? ORDER BY id DESC',
@@ -162,9 +151,8 @@ async def consultar(update: Update, context: ContextTypes.DEFAULT_TYPE):
   resposta = f"🔍 *Alertas encontrados para '{termo}':*\n\n"
   for item in resultados:
     bairro, rua, risco, horario, detalhes = item
-    alerta_emoji = '🟡' if risco == 1 else '🟧' if risco == 2 else '🔴'
     resposta += (
-        f'{alerta_emoji} *Risco Nível {risco}*\n'
+        f'⚠️ *Risco Nível {risco}*\n'
         f'📍 *Bairro:* {bairro}\n'
         f'🛣️ *Local/Rua:* {rua}\n'
         f'⏰ *Horário Crítico:* {horario}\n'
@@ -189,19 +177,17 @@ async def listar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('Nenhum registro no banco de dados ainda.')
     return
 
-  resposta = '📋 *Últimos 10 alertas cadastrados:*\n\n'
+  resposta = '📋 *Últimos alertas cadastrados:*\n\n'
   for item in resultados:
     bairro, rua, risco, horario, detalhes = item
-    alerta_emoji = '🟡' if risco == 1 else '🟧' if risco == 2 else '🔴'
     resposta += (
-        f'{alerta_emoji} *{bairro}* ({rua})\n'
-        f'⏰ {horario} | ⚠️ Risco {risco}: {detalhes}\n\n'
+        f'• *{bairro}* ({rua})\n  ⏰ {horario} | Risco {risco}: {detalhes}\n\n'
     )
 
   await update.message.reply_text(resposta, parse_mode='Markdown')
 
 
-# --- 5. PROCESSADOR DE ÁUDIO COM INTELIGÊNCIA ARTIFICIAL ---
+# --- 5. PROCESSADOR DE ÁUDIO ---
 async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
   msg_espera = await update.message.reply_text(
       '🎧 *Ouvindo e analisando relato com IA...*', parse_mode='Markdown'
@@ -233,24 +219,32 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         texto_transcrito
     )
 
-    if not bairro or bairro == 'Não informado':
-      await update.message.reply_text(
-          f'🗣️ *Você falou:* "_{texto_transcrito}_"\n\n'
-          '⚠️ Não consegui identificar o nome do bairro ou região com clareza.'
-          ' Tente mencionar o bairro no áudio!',
-          parse_mode='Markdown',
-      )
-      return
+    # Se a IA não conseguiu extrair em 5 partes, define padrão baseado no texto
+    if not bairro or bairro.lower() in [
+        'não informado',
+        'nao informado',
+        'none',
+    ]:
+      bairro = 'Bairro Identificado no Relato'
+
+    if not rua or rua.lower() in ['não informado', 'nao informado', 'none']:
+      rua = 'Todo o Bairro / Vias de Acesso'
+
+    if not horario_critico:
+      horario_critico = 'Dia e Noite'
 
     try:
       risco = int(risco_str)
     except (ValueError, TypeError):
-      risco = 2
+      risco = 3 if '3' in texto_transcrito else 2
 
+    if not detalhes:
+      detalhes = texto_transcrito
+
+    # Salva no Banco de Dados
     conn = sqlite3.connect('banco_risco.db')
     cursor = conn.cursor()
 
-    # Garantir que a coluna 'horario_critico' exista no banco existente
     cursor.execute('PRAGMA table_info(alertas)')
     colunas = [coluna[1] for coluna in cursor.fetchall()]
     if 'horario_critico' not in colunas:
@@ -264,11 +258,9 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    alerta_emoji = '🟡' if risco == 1 else '🟧' if risco == 2 else '🔴'
     msg_sucesso = (
         f'🗣️ *Sua fala:* "_{texto_transcrito}_"\n\n'
-        f'🤖 *Interpretação Inteligente:*\n'
-        f'{alerta_emoji} *Alerta Salvo com Sucesso!*\n'
+        f'🤖 *Alerta Cadastrado com Sucesso!*\n'
         f'📍 *Bairro:* {bairro}\n'
         f'🛣️ *Local/Rua:* {rua}\n'
         f'⏰ *Horário Crítico:* {horario_critico}\n'
@@ -280,8 +272,7 @@ async def processar_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
   except Exception as e:
     logging.error(f'Erro no processamento de áudio: {e}')
     await update.message.reply_text(
-        '❌ Não consegui processar o áudio. Tente falar novamente com mais'
-        ' clareza.'
+        '❌ Erro ao processar o áudio. Tente novamente.'
     )
 
 
@@ -292,7 +283,7 @@ if __name__ == '__main__':
 
   telegram_token = os.environ.get('TELEGRAM_TOKEN')
   if not telegram_token:
-    raise ValueError('A variável TELEGRAM_TOKEN não foi configurada no Render!')
+    raise ValueError('A variavel TELEGRAM_TOKEN nao foi configurada!')
 
   app_bot = ApplicationBuilder().token(telegram_token).build()
 
@@ -301,5 +292,5 @@ if __name__ == '__main__':
   app_bot.add_handler(CommandHandler('listar', listar))
   app_bot.add_handler(MessageHandler(filters.VOICE, processar_audio))
 
-  print('Bot com IA Groq e Mapeamento por Horário/Bairro rodando...')
+  print('Bot de Mapeamento Rodando...')
   app_bot.run_polling()
