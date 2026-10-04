@@ -151,25 +151,45 @@ def obter_endereco_gps(lat, lon):
     url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=18&addressdetails=1"
     headers = {"User-Agent": "BotSegurancaIguacu/2.0"}
     res = requests.get(url, headers=headers, timeout=5)
+
     if res.status_code == 200:
       dados = res.json().get("address", {})
+
+      # Prioridade para a Rua
       rua = (
           dados.get("road")
           or dados.get("pedestrian")
-          or dados.get("suburb")
-          or "Via Próxima"
+          or dados.get("footway")
+          or dados.get("path")
+          or "Via de Acesso"
       )
+
+      # Prioridade para capturar o Bairro corretamente antes do Município
       bairro = (
           dados.get("suburb")
           or dados.get("neighbourhood")
+          or dados.get("quarter")
+          or dados.get("hamlet")
+          or dados.get("residential")
           or dados.get("city_district")
-          or dados.get("city")
-          or "Nova Iguaçu"
+          or "Grama"
       )
+
+      # Evita que o nome do município sobressaia no campo de Bairro
+      if bairro.lower() in [
+          "nova iguaçu",
+          "nova iguacu",
+          "rio de janeiro",
+      ] and ("suburb" in dados or "neighbourhood" in dados):
+        bairro = (
+            dados.get("suburb") or dados.get("neighbourhood") or "Nova Iguaçu"
+        )
+
       return bairro, rua
   except Exception as e:
     logging.error(f"Erro no geocoding: {e}")
-  return "Nova Iguaçu", "Via de Acesso"
+
+  return "Região do Grama", "Via Próxima"
 
 
 # --- ÁUDIO DE RESPOSTA ---
