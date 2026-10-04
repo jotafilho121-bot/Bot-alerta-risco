@@ -213,26 +213,27 @@ def analisar_mensagem_com_groq(texto_entrada, contexto_gps=""):
   client = Groq(api_key=groq_api_key)
 
   prompt = f"""
-    Voce e um assistente de risco viario para entregadores em Nova Iguacu e Baixada Fluminense.
-    Analise a mensagem recebida por texto ou transcricao de audio.
+    Você é um assistente de inteligência em risco viário para entregadores em Nova Iguaçu e Baixada Fluminense.
+    Analise a mensagem recebida.
 
     {contexto_gps}
-    Mensagem do usuario: "{texto_entrada}"
+    Mensagem do usuário: "{texto_entrada}"
 
-    A intencao do usuario e CONSULTAR (perguntar sobre seguranca/local) ou CADASTRAR (relatar risco/assalto/perigo/alerta)?
+    Sua tarefa é determinar se a mensagem é um CADASTRO de risco (relato de assalto, perigo, alerta, aviso de risco) ou uma CONSULTA (pergunta sobre segurança de um local).
 
-    Responda ESTRITAMENTE em um dos dois formatos:
+    Responda ESTRITAMENTE em uma linha usando os delimitadores '|':
 
-    Se for CONSULTA:
-    CONSULTA | NOME_DO_BAIRRO_OU_RUA | {texto_entrada}
+    Se for CADASTRO de um alerta/risco:
+    CADASTRO | BAIRRO | RUA | RISCO | HORARIO | DETALHES
 
-    Se for CADASTRO:
-    CADASTRO | BAIRRO | RUA | RISCO (1, 2 ou 3) | HORARIO_CRITICO | DETALHES | {texto_entrada}
+    Se for CONSULTA sobre um local:
+    CONSULTA | BAIRRO_OU_RUA
 
-    Regras para Cadastro:
-    - RISCO: 1=Baixo, 2=Medio, 3=Alto/Critico.
-    - Se o usuario mencionar orientação de fluxo (ex: "lado direito de quem vai de X para Y"), converta em orientacao clara com pontos de referencia fixos (ex: travessas a direita sentido Y).
-    - Se o usuario disser "aqui" e houver informacao de GPS no contexto, use o bairro/rua do GPS.
+    Regras de extração:
+    - BAIRRO e RUA: Identifique no texto. Se não houver bairro explícito, tente deduzir pelo local ou use 'Nova Iguaçu'.
+    - RISCO: Número 1 (Baixo), 2 (Médio) ou 3 (Alto/Crítico). Se a mensagem falar em assalto, armados ou perigo alto, use 3.
+    - HORARIO: Exemplo 'Recente', 'Noite', 'Dia' ou 'Não especificado'.
+    - DETALHES: Breve resumo do alerta do usuário.
     """
 
   try:
@@ -351,16 +352,16 @@ async def processar_mensagem(
 
       voice_file = await context.bot.get_file(update.message.voice.file_id)
       byte_array = await voice_file.download_as_bytearray()
-      audio_bytes = io.BytesIO(byte_array)
-      audio_bytes.name = "voice.oga"
 
+      # Correção na estrutura de envio do arquivo para a Groq
       transcription = client.audio.transcriptions.create(
-          file=(audio_bytes.name, audio_bytes.read()),
+          file=("voice.oga", bytes(byte_array)),
           model="whisper-large-v3-turbo",
           language="pt",
           response_format="text",
       )
       texto_entrada = str(transcription).strip()
+      logging.info(f"Transcrição realizada: {texto_entrada}")
     except Exception as e:
       logging.error(f"Erro na transcrição: {e}")
       await update.message.reply_text(
@@ -566,7 +567,6 @@ def rodar_bot():
       app_bot = ApplicationBuilder().token(telegram_token).build()
       app_bot.add_error_handler(lidar_com_erros)
 
-      # Força a exclusão de webhooks e limpa requisições presas
       loop.run_until_complete(
           app_bot.bot.delete_webhook(drop_pending_updates=True)
       )
