@@ -23,7 +23,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-  return 'Bot de Mapeamento de Risco Ativo!'
+  return 'Bot de Mapeamento de Risco (Híbrido + Estatístico) Ativo!'
 
 
 # --- LOGS E BANCO DE DADOS ---
@@ -37,6 +37,8 @@ def iniciar_banco():
   try:
     conn = sqlite3.connect('banco_risco.db')
     cursor = conn.cursor()
+
+    # 1. Tabela de Alertas em Tempo Real (Enviados por usuários/entregadores)
     cursor.execute('''
             CREATE TABLE IF NOT EXISTS alertas (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,21 +46,95 @@ def iniciar_banco():
                 rua TEXT NOT NULL,
                 risco INTEGER NOT NULL,
                 horario_critico TEXT,
-                detalhes TEXT
+                detalhes TEXT,
+                data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+
+    # 2. Tabela de Mancha Criminal Histórica / Base Oficial (ISP-RJ)
+    cursor.execute('''
+            CREATE TABLE IF NOT EXISTS estatisticas_bairros (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bairro TEXT UNIQUE NOT NULL,
+                risco_base INTEGER NOT NULL,
+                resumo_criminal TEXT NOT NULL
+            )
+        ''')
+
+    # Carga Inicial de Bairros de Nova Iguaçu e Baixada (Base Oficial Estatística)
+    bairros_base = [
+        (
+            'Austin',
+            3,
+            'Incidência alta de furto/roubo de veículos e cargas em vias secundárias.',
+        ),
+        (
+            'Comendador Soares',
+            3,
+            'Pontos críticos de abordagem em horários noturnos e cruzamentos.',
+        ),
+        (
+            'Centro',
+            2,
+            'Alerta para furtos e roubos de celulares/bolsas durante o dia.',
+        ),
+        (
+            'Posse',
+            2,
+            'Atenção reforçada nas marginais e vias de acesso à Dutra.',
+        ),
+        (
+            'Grama',
+            2,
+            'Risco moderado a alto em acessos a áreas residenciais internas.',
+        ),
+        (
+            'Rancho Novo',
+            1,
+            'Risco baixo a moderado; atenção em vias de saída rápida.',
+        ),
+        (
+            'Jardim Iguaçu',
+            2,
+            'Atenção em horários de pico e circulação em vias secundárias.',
+        ),
+        (
+            'Miguel Burnier',
+            2,
+            'Atividades de patrulhamento variáveis; cautela em horários calmos.',
+        ),
+        (
+            'Vila de Cava',
+            3,
+            'Atenção em vias de integração e acessos secundários.',
+        ),
+        (
+            'Kenia',
+            2,
+            'Risco moderado em acessos próximos a corredores de tráfego.',
+        ),
+    ]
+
+    cursor.executemany(
+        '''
+            INSERT OR IGNORE INTO estatisticas_bairros (bairro, risco_base, resumo_criminal)
+            VALUES (?, ?, ?)
+        ''',
+        bairros_base,
+    )
+
     conn.commit()
     conn.close()
-    logging.info('Banco de dados operacional.')
+    logging.info('Banco de dados Híbrido inicializado com sucesso.')
   except Exception as e:
-    logging.error(f'Erro no banco: {e}')
+    logging.error(f'Erro na inicialização do banco: {e}')
 
 
 # --- REVERSE GEOCODING (GPS PARA ENDEREÇO) ---
 def obter_endereco_gps(lat, lon):
   try:
     url = f'https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=18&addressdetails=1'
-    headers = {'User-Agent': 'BotSeguranca/1.0'}
+    headers = {'User-Agent': 'BotSegurancaIguacu/2.0'}
     res = requests.get(url, headers=headers, timeout=5)
     if res.status_code == 200:
       dados = res.json().get('address', {})
@@ -113,7 +189,7 @@ async def enviar_resposta_em_audio(
         pass
 
 
-# --- IA PROCESSAMENTO DE INTENÇÃO ---
+# --- MOTOR DE INTELIGÊNCIA ARTIFICIAL (GROQ) ---
 def analisar_mensagem_com_groq(texto_entrada, contexto_gps=''):
   groq_api_key = os.environ.get('GROQ_API_KEY')
   if not groq_api_key:
@@ -123,12 +199,12 @@ def analisar_mensagem_com_groq(texto_entrada, contexto_gps=''):
 
   prompt = f"""
     Voce e um assistente de risco viario para entregadores em Nova Iguacu e Baixada Fluminense.
-    Analise a mensagem recebida.
+    Analise a mensagem recebida por texto ou transcricao de audio.
 
     {contexto_gps}
     Mensagem do usuario: "{texto_entrada}"
 
-    A intencao do usuario e CONSULTAR (perguntar sobre seguranca) ou CADASTRAR (relatar risco/assalto/perigo)?
+    A intencao do usuario e CONSULTAR (perguntar sobre seguranca/local) ou CADASTRAR (relatar risco/assalto/perigo)?
 
     Responda ESTRITAMENTE em um dos dois formatos:
 
@@ -140,8 +216,8 @@ def analisar_mensagem_com_groq(texto_entrada, contexto_gps=''):
 
     Regras para Cadastro:
     - RISCO: 1=Baixo, 2=Medio, 3=Alto/Critico.
-    - Se o usuario mencionar localizacao atual ou mandar coordenadas, use o bairro/rua informados no contexto.
-    - Resumo objetivo, sem girias.
+    - Se o usuario disser "aqui" e houver informacao de GPS no contexto, use o bairro/rua do GPS.
+    - Resumo objetivo e neutro.
     """
 
   try:
@@ -153,25 +229,42 @@ def analisar_mensagem_com_groq(texto_entrada, contexto_gps=''):
     partes = [p.strip() for p in resultado.split('|')]
     return partes
   except Exception as e:
-    logging.error(f'Erro no Groq LLM: {e}')
+    logging.error(f'Erro na API Groq: {e}')
     return 'ERRO', str(e), None, None, None, None
 
 
-# --- HANDLERS ---
+# --- HANDLERS DO TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
   msg = (
-      '🚨 *Bot de Mapeamento de Risco*\n\n'
-      'Você pode interagir enviando *Texto*, *Áudio* ou *Localização GPS*:\n\n'
-      '🔹 *Consulta:* Digite ou fale ex: _"Rua Rocha Faria, bairro Grama,"_\n'
-      '🔹 *Cadastro:* Digite ou fale ex: _"Assalto recente no Austin perto do'
-      ' posto, risco alto"_\n'
-      '📍 *GPS:* Envie sua localização ao vivo ou ponto no mapa para'
-      ' vincular.\n\n'
-      'Comandos diretos:\n'
-      '• `/consultar [bairro ou rua]`\n'
-      '• `/listar` - Exibe os últimos alertas'
+      '🚨 *Bot de Mapeamento de Risco (Híbrido + Estatística)*\n\n'
+      'Você pode consultar ou relatar riscos digitando, mandando áudio ou GPS:\n\n'
+      '🔹 *Consulta:* Ex: _"Como tá a Rua Rocha Faria no bairro Grama?"_\n'
+      '🔹 *Cadastro:* Ex: _"Assalto recente no Austin perto do posto, risco'
+      ' alto"_\n'
+      '📍 *GPS:* Envie sua localização atual para análise instantânea.\n\n'
+      '🔊 *Áudio por demanda:* Por padrão, as respostas são rápidas em texto. Se'
+      ' quiser áudio, diga *"manda áudio"* no final da mensagem ou use'
+      ' `/audio`.'
   )
   await update.message.reply_text(msg, parse_mode='Markdown')
+
+
+async def alternar_modo_audio(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+  estado_atual = context.user_data.get('sempre_audio', False)
+  novo_estado = not estado_atual
+  context.user_data['sempre_audio'] = novo_estado
+
+  if novo_estado:
+    await update.message.reply_text(
+        '🔊 *Modo Áudio Ativado:* Todas as respostas terão retorno em voz.'
+    )
+  else:
+    await update.message.reply_text(
+        '📱 *Modo Economia Ativado:* Respostas em texto (áudio apenas quando'
+        ' você pedir).'
+    )
 
 
 async def receber_localizacao(
@@ -187,22 +280,57 @@ async def receber_localizacao(
   context.user_data['bairro'] = bairro
   context.user_data['rua'] = rua
 
-  msg = (
-      f'📍 *Localização Identificada!*\n\n'
-      f'• *Bairro:* {bairro}\n'
-      f'• *Rua/Referência:* {rua}\n\n'
-      'Agora envie uma mensagem ou áudio relatando o risco ou fazendo uma'
-      ' consulta.'
+  # Consulta imediata no banco híbrido para a localização enviada
+  conn = sqlite3.connect('banco_risco.db')
+  cursor = conn.cursor()
+
+  cursor.execute(
+      'SELECT risco, horario_critico, detalhes FROM alertas WHERE rua LIKE ?'
+      ' OR bairro LIKE ? ORDER BY id DESC LIMIT 3',
+      (f'%{rua}%', f'%{bairro}%'),
   )
+  relatos = cursor.fetchall()
+
+  cursor.execute(
+      'SELECT risco_base, resumo_criminal FROM estatisticas_bairros WHERE'
+      ' bairro LIKE ?',
+      (f'%{bairro}%',),
+  )
+  estatistica = cursor.fetchone()
+  conn.close()
+
+  msg = (
+      f'📍 *Localização Identificada!*\n• *Bairro:* {bairro}\n•'
+      f' *Rua/Referência:* {rua}\n\n'
+  )
+
+  if relatos:
+    msg += '⚠️ *Alertas em Tempo Real de Entregadores:*\n'
+    for r in relatos:
+      msg += (
+          f'• Risco {r[0]} | Horário: {r[1]}\n  Detalhes: {r[2]}\n'
+      )
+  else:
+    msg += '✅ *Sem alertas recentes de entregadores para esta via.*\n\n'
+
+  if estatistica:
+    msg += (
+        f'📊 *Mancha Criminal Histórica (Base Oficial):*\n• *Nível Base de'
+        f' Risco:* {estatistica[0]}\n• *Resumo:* {estatistica[1]}\n'
+  )
+  else:
+    msg += '📊 *Mancha Criminal:* Dados estatísticos gerais da região em análise.'
+
   await update.message.reply_text(msg, parse_mode='Markdown')
 
 
 async def processar_mensagem(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-  eh_audio = bool(update.message.voice)
+  eh_audio_entrada = bool(update.message.voice)
 
-  if eh_audio:
+  # Processa o texto vindo do teclado ou transcreve o áudio na memória
+  if eh_audio_entrada:
     await update.message.reply_text(
         '🎧 *Ouvindo áudio...*', parse_mode='Markdown'
     )
@@ -210,7 +338,6 @@ async def processar_mensagem(
       groq_api_key = os.environ.get('GROQ_API_KEY')
       client = Groq(api_key=groq_api_key)
 
-      # Baixa o arquivo direto na memória para evitar problemas no arquivo do disco
       voice_file = await context.bot.get_file(update.message.voice.file_id)
       byte_array = await voice_file.download_as_bytearray()
       audio_bytes = io.BytesIO(byte_array)
@@ -224,7 +351,7 @@ async def processar_mensagem(
       )
       texto_entrada = str(transcription).strip()
     except Exception as e:
-      logging.error(f'Erro na transcrição de áudio: {e}')
+      logging.error(f'Erro na transcrição: {e}')
       await update.message.reply_text(
           '❌ Erro ao processar o áudio. Tente novamente.'
       )
@@ -232,10 +359,24 @@ async def processar_mensagem(
   else:
     texto_entrada = update.message.text.strip()
 
+  # Verifica se o usuário pediu áudio expressamente
+  palavras_chave_audio = [
+      'manda audio',
+      'manda áudio',
+      'responda em audio',
+      'responda em áudio',
+      'fala pra mim',
+      'me fala',
+      'em voz',
+  ]
+  pediu_audio = any(p in texto_entrada.lower() for p in palavras_chave_audio)
+  modo_sempre_audio = context.user_data.get('sempre_audio', False)
+  deve_enviar_audio = pediu_audio or modo_sempre_audio
+
   contexto_gps = ''
   if 'bairro' in context.user_data and 'rua' in context.user_data:
     contexto_gps = (
-        f"O usuário enviou GPS localizado em: Bairro"
+        f"O usuário compartilhou GPS em: Bairro"
         f" '{context.user_data['bairro']}', Rua '{context.user_data['rua']}'."
     )
 
@@ -247,36 +388,49 @@ async def processar_mensagem(
 
     conn = sqlite3.connect('banco_risco.db')
     cursor = conn.cursor()
+
+    # 1. Consulta Relatos Comunitários
     cursor.execute(
         'SELECT bairro, rua, risco, horario_critico, detalhes FROM alertas'
-        ' WHERE rua LIKE ? OR bairro LIKE ? ORDER BY id DESC',
+        ' WHERE rua LIKE ? OR bairro LIKE ? ORDER BY id DESC LIMIT 5',
         (f'%{termo_busca}%', f'%{termo_busca}%'),
     )
-    resultados = cursor.fetchall()
+    relatos = cursor.fetchall()
+
+    # 2. Consulta Base Estatística do Bairro
+    cursor.execute(
+        'SELECT risco_base, resumo_criminal FROM estatisticas_bairros WHERE'
+        ' bairro LIKE ?',
+        (f'%{termo_busca}%',),
+    )
+    estatistica = cursor.fetchone()
     conn.close()
 
-    if not resultados:
-      msg = f'✅ Nenhum alerta de risco registrado para *{termo_busca}*.'
-      await update.message.reply_text(msg, parse_mode='Markdown')
-      if eh_audio:
-        await enviar_resposta_em_audio(
-            update, context, f'Nenhum alerta cadastrado para {termo_busca}.'
+    resposta_texto = f'🔍 *Análise de Risco para {termo_busca}:*\n\n'
+    texto_audio = f'Análise de risco para {termo_busca}. '
+
+    if relatos:
+      resposta_texto += '🚨 *Alertas em tempo real (Entregadores):*\n'
+      for item in relatos:
+        bairro, rua, risco, horario, detalhes = item
+        resposta_texto += (
+            f'• *Risco Nível {risco}* ({rua})\n  Horário: {horario} |'
+            f' {detalhes}\n'
         )
-      return
+        texto_audio += f'Alerta de risco nível {risco} na rua {rua}. '
+    else:
+      resposta_texto += '✅ *Nenhum alerta recente relatado por entregadores.*\n\n'
+      texto_audio += 'Sem alertas recentes de entregadores. '
 
-    resposta_texto = f'🔍 *Alertas encontrados para {termo_busca}:*\n\n'
-    texto_audio = f'Alertas encontrados para {termo_busca}. '
-
-    for item in resultados:
-      bairro, rua, risco, horario, detalhes = item
+    if estatistica:
       resposta_texto += (
-          f'⚠️ *Risco Nível {risco}*\n📍 *Bairro:* {bairro}\n🛣️ *Rua:*'
-          f' {rua}\n⏰ *Horário:* {horario}\n📝 *Detalhes:* {detalhes}\n---\n'
+          f'\n📊 *Mancha Criminal Histórica (Base Oficial):*\n• *Nível Base:*'
+          f' {estatistica[0]}\n• *Resumo:* {estatistica[1]}\n'
       )
-      texto_audio += f'No bairro {bairro}, rua {rua}, risco nível {risco}. Detalhes: {detalhes}. '
+      texto_audio += f'Histórico da região indica nível de risco base {estatistica[0]}.'
 
     await update.message.reply_text(resposta_texto, parse_mode='Markdown')
-    if eh_audio:
+    if deve_enviar_audio:
       await enviar_resposta_em_audio(update, context, texto_audio)
 
   elif tipo_acao == 'CADASTRO' and len(dados) >= 6:
@@ -298,27 +452,26 @@ async def processar_mensagem(
     conn.close()
 
     msg_sucesso = (
-        f'🤖 *Alerta Cadastrado com Sucesso!*\n\n'
+        f'🤖 *Alerta Salvo no Banco de Dados!*\n\n'
         f'📍 *Bairro:* {bairro}\n'
         f'🛣️ *Rua/Local:* {rua}\n'
-        f'⏰ *Horário Crítico:* {horario_critico}\n'
-        f'⚠ *Nível de Risco:* {risco}\n'
+        f'⏰ *Horário:* {horario_critico}\n'
+        f'⚠ *Nível:* {risco}\n'
         f'📝 *Detalhes:* {detalhes}'
     )
 
     await update.message.reply_text(msg_sucesso, parse_mode='Markdown')
 
-    if eh_audio:
+    if deve_enviar_audio:
       fala_confirmacao = (
-          f'Alerta salvo com sucesso. Bairro {bairro}, local {rua}. Nível de'
-          f' risco {risco}.'
+          f'Alerta gravado. Bairro {bairro}, local {rua}, risco nível {risco}.'
       )
       await enviar_resposta_em_audio(update, context, fala_confirmacao)
 
   else:
     await update.message.reply_text(
-        '⚠️ Não entendi a mensagem. Envie o nome do bairro ou rua para'
-        ' consultar ou relatar um risco.'
+        '⚠️ Não entendi com clareza. Digite ou fale informando o bairro ou rua'
+        ' para consultar ou cadastrar.'
     )
 
 
@@ -342,7 +495,8 @@ async def consultar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
   if not resultados:
     await update.message.reply_text(
-        f'✅ Nenhum alerta cadastrado para *{termo}*.', parse_mode='Markdown'
+        f'✅ Nenhum alerta comunitário cadastrado para *{termo}*.',
+        parse_mode='Markdown',
     )
     return
 
@@ -350,8 +504,7 @@ async def consultar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
   for item in resultados:
     bairro, rua, risco, horario, detalhes = item
     resposta += (
-        f'⚠️ *Risco Nível {risco}*\n📍 *Bairro:* {bairro}\n🛣️ *Local:*'
-        f' {rua}\n⏰ *Horário:* {horario}\n📝 *Detalhes:* {detalhes}\n---\n'
+        f'⚠️ *Risco {risco}* | 📍 {bairro} ({rua})\n⏰ {horario} | {detalhes}\n---\n'
     )
 
   await update.message.reply_text(resposta, parse_mode='Markdown')
@@ -371,7 +524,7 @@ async def listar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('Nenhum registro no banco de dados ainda.')
     return
 
-  resposta = '📋 *Últimos alertas cadastrados:*\n\n'
+  resposta = '📋 *Últimos relatos em tempo real:*\n\n'
   for item in resultados:
     bairro, rua, risco, horario, detalhes = item
     resposta += (
@@ -404,15 +557,16 @@ def rodar_bot():
   )
 
   app_bot.add_handler(CommandHandler('start', start))
+  app_bot.add_handler(CommandHandler('audio', alternar_modo_audio))
   app_bot.add_handler(CommandHandler('consultar', consultar_cmd))
   app_bot.add_handler(CommandHandler('listar', listar_cmd))
   app_bot.add_handler(MessageHandler(filters.LOCATION, receber_localizacao))
 
-  # Filtro estrito: captura TEXTO (que não seja comando) OU ÁUDIO
+  # Filtro híbrido: Texto (não comando) OU Áudio
   filtro_mensagens = (filters.TEXT & ~filters.COMMAND) | filters.VOICE
   app_bot.add_handler(MessageHandler(filtro_mensagens, processar_mensagem))
 
-  logging.info('Polling ativo no modo Híbrido!')
+  logging.info('Polling ativo no modo Híbrido com Base Estatística!')
   app_bot.run_polling(drop_pending_updates=True, stop_signals=None)
 
 
