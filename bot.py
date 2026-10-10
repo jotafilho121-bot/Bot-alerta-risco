@@ -145,7 +145,7 @@ def iniciar_banco():
     logging.error(f"Erro no banco: {e}")
 
 
-# --- GEOLOCALIZAÇÃO ROBUSTA ---
+# --- GEOLOCALIZAÇÃO ---
 def obter_endereco_gps(lat, lon):
   try:
     url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=18&addressdetails=1"
@@ -154,102 +154,42 @@ def obter_endereco_gps(lat, lon):
 
     if res.status_code == 200:
       dados = res.json().get("address", {})
-
       rua = (
           dados.get("road")
           or dados.get("pedestrian")
           or dados.get("footway")
-          or dados.get("path")
           or "Via Próxima"
       )
-
-      # Tenta pegar campos específicos de bairro antes do município
       bairro = (
           dados.get("suburb")
           or dados.get("neighbourhood")
           or dados.get("quarter")
-          or dados.get("hamlet")
-          or dados.get("residential")
-          or dados.get("city_district")
+          or "Grama"
       )
-
-      # Se o Nominatim retornar apenas a cidade genérica, ajustamos para a região atual (Grama)
-      if not bairro or bairro.lower() in [
-          "nova iguaçu",
-          "nova iguacu",
-          "rio de janeiro",
-      ]:
-        bairro = "Grama"
-
       return bairro, rua
   except Exception as e:
     logging.error(f"Erro no geocoding: {e}")
-
   return "Grama", "Via Próxima"
 
 
-# --- ÁUDIO DE RESPOSTA ---
-async def gerar_audio_neural(texto, caminho_arquivo):
-  communicate = edge_tts.Communicate(
-      texto, voice="pt-BR-FranciscaNeural", rate="+0%"
-  )
-  await communicate.save(caminho_arquivo)
-
-
-async def enviar_resposta_em_audio(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, texto_resposta: str
-):
-  caminho_mp3 = f"resposta_{update.effective_chat.id}.mp3"
-  try:
-    await gerar_audio_neural(texto_resposta, caminho_mp3)
-    if os.path.exists(caminho_mp3):
-      with open(caminho_mp3, "rb") as audio_file:
-        await context.bot.send_audio(
-            chat_id=update.effective_chat.id,
-            audio=audio_file,
-            title="Alerta de Segurança",
-            filename="alerta.mp3",
-        )
-  except Exception as e:
-    logging.error(f"Erro envio audio: {e}")
-  finally:
-    if os.path.exists(caminho_mp3):
-      try:
-        os.remove(caminho_mp3)
-      except Exception:
-        pass
-
-
-# --- INTELIGÊNCIA ARTIFICIAL (GROQ) ---
-def analisar_mensagem_com_groq(texto_entrada, contexto_gps=""):
+# --- INTELIGÊNCIA ARTIFICIAL (GROQ) COM FALLBACK SEGURO ---
+def analisar_mensagem_com_groq(texto_entrada):
   groq_api_key = os.environ.get("GROQ_API_KEY")
   if not groq_api_key:
-    return ["ERRO", "Sem API Key"]
-
-  client = Groq(api_key=groq_api_key)
-
-  prompt = f"""
-    Sua tarefa é analisar a mensagem de um entregador em Nova Iguaçu e classificar em CADASTRO ou CONSULTA.
-
-    {contexto_gps}
-    Mensagem: "{texto_entrada}"
-
-    Formato OBRIGATÓRIO de resposta (apenas uma linha separada por |):
-
-    Se for CADASTRO de alerta/risco/assalto:
-    CADASTRO | BAIRRO | RUA | RISCO_NUMERO | HORARIO | DETALHES
-
-    Se for CONSULTA sobre segurança de local:
-    CONSULTA | BAIRRO_OU_RUA
-
-    Exemplos:
-    CADASTRO | Grama | Rua Rocha Faria | 3 | Recente | Assalto a entregador recente
-    CONSULTA | Austin
-
-    Responda apenas na estrutura solicitada, sem textos adicionais.
-    """
+    return "CONSULTA", texto_entrada
 
   try:
+    client = Groq(api_key=groq_api_key)
+    prompt = f"""
+        Analise a frase do entregador e decida se é CONSULTA ou CADASTRO.
+        Frase: "{texto_entrada}"
+
+        Responda ESTRITAMENTE no formato:
+        CONSULTA | termo_de_busca
+        ou
+        CADASTRO | bairro | rua | risco_1_a_3 | horario | detalhes
+        """
+
     resposta = client.chat.completions.create(
         messages=[{"role": "user", "content": prompt}],
         model="llama-3.3-70b-versatile",
@@ -259,17 +199,18 @@ def analisar_mensagem_com_groq(texto_entrada, contexto_gps=""):
     partes = [p.strip() for p in resultado.split("|")]
     return partes
   except Exception as e:
-    logging.error(f"Erro Groq Text: {e}")
-    return ["ERRO", str(e)]
+    logging.error(f"Erro Groq: {e}")
+    # Fallback inteligente: se a IA falhar, trata o texto digitado como uma consulta direta
+    return ["CONSULTA", texto_entrada]
 
 
 # --- HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
   msg = (
       "🚨 *Bot Mapeador de Entregas Ativo*\n\n"
-      "• Mande texto, áudio ou sua localização (GPS).\n"
-      '• Para consultar: _"Como tá a Rua Rocha Faria no bairro Grama?"_\n'
-      '• Para cadastrar: _"Assalto na Rua Rocha Faria no Grama, risco 3"_'
+      "• Envie sua localização GPS para análise instantânea.\n"
+      '• Ou digite diretamente o nome da rua ou bairro para consultar (Ex:'
+      ' _"Rocha Faria"_).'
   )
   await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -282,9 +223,6 @@ async def receber_localizacao(
     lon = update.message.location.longitude
 
     bairro, rua = obter_endereco_gps(lat, lon)
-
-    context.user_data["bairro"] = bairro
-    context.user_data["rua"] = rua
 
     conn = sqlite3.connect("banco_risco.db")
     cursor = conn.cursor()
@@ -331,68 +269,21 @@ async def processar_mensagem(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
   try:
-    eh_audio = bool(update.message.voice)
     texto_entrada = ""
-
-    if eh_audio:
+    if update.message.voice:
       await update.message.reply_text(
-          "🎧 *Ouvindo áudio...*", parse_mode="Markdown"
+          "⚠️ Processamento de áudio temporariamente desativado para evitar"
+          " travamentos. Por favor, digite sua consulta ou envie o GPS."
       )
-      caminho_temp = f"audio_{update.effective_chat.id}.ogg"
-      try:
-        groq_api_key = os.environ.get("GROQ_API_KEY")
-        client = Groq(api_key=groq_api_key)
-
-        voice_file = await context.bot.get_file(update.message.voice.file_id)
-        await voice_file.download_to_drive(caminho_temp)
-
-        # Envio corrigido e otimizado para o Whisper da Groq
-        with open(caminho_temp, "rb") as audio_file_obj:
-          transcription = client.audio.transcriptions.create(
-              file=("audio.ogg", audio_file_obj.read()),
-              model="whisper-large-v3-turbo",
-              language="pt",
-              response_format="text",
-          )
-
-        texto_entrada = str(transcription).strip()
-        logging.info(f"Áudio transcrito com sucesso: {texto_entrada}")
-
-      except Exception as e:
-        logging.error(f"Erro crítico no Whisper/Groq: {e}")
-        await update.message.reply_text(
-            "❌ Não consegui processar o áudio. Tente enviar novamente ou digite"
-            " em texto."
-        )
-        return
-      finally:
-        if os.path.exists(caminho_temp):
-          try:
-            os.remove(caminho_temp)
-          except Exception:
-            pass
+      return
     else:
       texto_entrada = update.message.text.strip()
 
-    contexto_gps = ""
-    if "bairro" in context.user_data and "rua" in context.user_data:
-      contexto_gps = (
-          f"Localização GPS recente: Bairro '{context.user_data['bairro']}', Rua"
-          f" '{context.user_data['rua']}'."
-      )
-
-    dados = analisar_mensagem_com_groq(texto_entrada, contexto_gps)
-
-    if not dados or len(dados) == 0:
-      await update.message.reply_text(
-          "⚠️ Não entendi a mensagem. Informe o bairro ou rua."
-      )
-      return
-
-    tipo_acao = dados[0].upper()
+    dados = analisar_mensagem_com_groq(texto_entrada)
+    tipo_acao = dados[0].upper() if len(dados) > 0 else "CONSULTA"
 
     if tipo_acao == "CONSULTA":
-      termo_busca = dados[1] if len(dados) > 1 else "Região"
+      termo_busca = dados[1] if len(dados) > 1 else texto_entrada
 
       conn = sqlite3.connect("banco_risco.db")
       cursor = conn.cursor()
@@ -412,7 +303,7 @@ async def processar_mensagem(
       estatistica = cursor.fetchone()
       conn.close()
 
-      resposta = f"🔍 *Análise para {termo_busca}:*\n\n"
+      resposta = f"🔍 *Análise para '{termo_busca}':*\n\n"
       if relatos:
         resposta += "🚨 *Alertas Recentes:*\n"
         for item in relatos:
@@ -434,14 +325,9 @@ async def processar_mensagem(
     elif tipo_acao == "CADASTRO" and len(dados) >= 4:
       bairro = dados[1] if len(dados) > 1 else "Grama"
       rua = dados[2] if len(dados) > 2 else "Via Não Informada"
-      risco_raw = dados[3] if len(dados) > 3 else "3"
+      risco = int(dados[3]) if dados[3].isdigit() else 3
       horario = dados[4] if len(dados) > 4 else "Recente"
       detalhes = dados[5] if len(dados) > 5 else texto_entrada
-
-      try:
-        risco = int("".join(filter(str.isdigit, risco_raw)))
-      except ValueError:
-        risco = 3
 
       conn = sqlite3.connect("banco_risco.db")
       cursor = conn.cursor()
@@ -453,42 +339,32 @@ async def processar_mensagem(
       conn.commit()
       conn.close()
 
-      msg_sucesso = (
-          f"🤖 *Alerta Cadastrado com Sucesso!*\n\n"
-          f"📍 *Bairro:* {bairro}\n"
-          f"🛣️ *Rua:* {rua}\n"
-          f"⚠ *Risco:* Nível {risco}\n"
-          f"⏰ *Horário:* {horario}\n"
-          f"📝 *Detalhes:* {detalhes}"
-      )
-      await update.message.reply_text(msg_sucesso, parse_mode="Markdown")
-
-    else:
       await update.message.reply_text(
-          "⚠️ Não entendi com clareza. Digite ou fale informando o bairro ou rua"
-          " para consultar ou cadastrar."
+          f"🤖 *Alerta Cadastrado!*\n📍 Bairro: {bairro}\n🛣️ Rua:"
+          f" {rua}\n⚠ Risco: {risco}",
+          parse_mode="Markdown",
+      )
+    else:
+      # Busca direta por texto caso a IA retorne algo fora do padrão
+      await update.message.reply_text(
+          f"🔍 Buscando registros para: *{texto_entrada}*", parse_mode="Markdown"
       )
 
   except Exception as e:
-    logging.error(f"Erro geral em processar_mensagem: {e}")
-    await update.message.reply_text(
-        "❌ Ocorreu um erro ao processar sua mensagem."
-    )
+    logging.error(f"Erro em processar_mensagem: {e}")
+    await update.message.reply_text("❌ Ocorreu um erro ao processar sua busca.")
 
 
 def rodar_bot():
   telegram_token = os.environ.get("TELEGRAM_TOKEN")
   if not telegram_token:
-    logging.error("TELEGRAM_TOKEN ausente.")
     return
 
   while True:
     try:
       loop = asyncio.new_event_loop()
       asyncio.set_event_loop(loop)
-
       app_bot = ApplicationBuilder().token(telegram_token).build()
-
       loop.run_until_complete(
           app_bot.bot.delete_webhook(drop_pending_updates=True)
       )
@@ -497,20 +373,16 @@ def rodar_bot():
       app_bot.add_handler(
           MessageHandler(filters.LOCATION, receber_localizacao)
       )
+      app_bot.add_handler(
+          MessageHandler((filters.TEXT & ~filters.COMMAND) | filters.VOICE, processar_mensagem)
+      )
 
-      filtro_mensagens = (filters.TEXT & ~filters.COMMAND) | filters.VOICE
-      app_bot.add_handler(MessageHandler(filtro_mensagens, processar_mensagem))
-
-      logging.info("Bot rodando!")
       app_bot.run_polling(drop_pending_updates=True, stop_signals=None)
-
     except Exception as e:
-      logging.error(f"Erro no polling: {e}")
       time.sleep(5)
 
 
 iniciar_banco()
-
 t_bot = threading.Thread(target=rodar_bot, daemon=True)
 t_bot.start()
 
