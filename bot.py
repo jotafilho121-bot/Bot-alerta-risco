@@ -173,17 +173,57 @@ def obter_endereco_gps(lat, lon):
   return "Nova Iguaçu", "Via Próxima"
 
 
+# --- IA PARA EXTRAÇÃO DE CADASTRO ---
+def extrair_dados_cadastro_com_groq(texto_entrada):
+  groq_api_key = os.environ.get("GROQ_API_KEY")
+  if not groq_api_key:
+    return "Grama", "Rua Não Informada", 2, "Recente", texto_entrada
+
+  try:
+    client = Groq(api_key=groq_api_key)
+    prompt = f"""
+        Extraia as informações desta frase de cadastro de segurança de entregador em Nova Iguaçu.
+        Frase: "{texto_entrada}"
+
+        Responda ESTRITAMENTE em uma única linha no formato exato:
+        BAIRRO | RUA | RISCO (apenas número 1, 2 ou 3) | HORARIO | DETALHES
+
+        Exemplo:
+        Grama | Rua Cajueiro | 2 | A partir das 17h | Via escura e movimentada
+        """
+
+    resposta = client.chat.completions.create(
+        messages=[{"role": "user", "content": prompt}],
+        model="llama-3.3-70b-versatile",
+        temperature=0.1,
+    )
+    resultado = resposta.choices[0].message.content.strip()
+    partes = [p.strip() for p in resultado.split("|")]
+    if len(partes) >= 5:
+      bairro = partes[0]
+      rua = partes[1]
+      try:
+        risco = int("".join(filter(str.isdigit, partes[2])))
+      except ValueError:
+        risco = 2
+      horario = partes[3]
+      detalhes = partes[4]
+      return bairro, rua, risco, horario, detalhes
+  except Exception as e:
+    logging.error(f"Erro IA Cadastro: {e}")
+
+  return "Grama", "Via Informada", 2, "Recente", texto_entrada
+
+
 # --- HANDLERS DO TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
   msg = (
       "🚨 *Bot Mapeador de Entregas Ativo*\n\n"
       "📍 *Enviar GPS:* Mande sua localização para consultar a via instantaneamente.\n\n"
-      "🔍 *Como Consultar por Texto:*\n"
-      'Digite: `consultar [nome da rua ou bairro]`\n'
-      "Exemplo: `consultar Rua Rocha Faria`\n\n"
-      "📝 *Como Cadastrar um Alerta:*\n"
-      'Digite: `cadastrar [Bairro] | [Rua] | [Risco 1 a 3] | [Detalhes]`\n'
-      "Exemplo: `cadastrar Ambaí | Rua João Haste | 3 | Assalto constante à noite`"
+      "📝 *Para Cadastrar:* Comece com a palavra *Cadastrar*\n"
+      'Exemplo: _"Cadastrar Rua Cajueiro no bairro Grama risco 2 a partir das 17h"_\n\n'
+      "🔍 *Para Consultar:* Comece com a palavra *Consultar* ou digite o local.\n"
+      'Exemplo: _"Consultar Rua Cajueiro"_'
   )
   await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -244,7 +284,7 @@ async def processar_mensagem(
   try:
     if update.message.voice:
       await update.message.reply_text(
-          "⚠️ Processamento de áudio temporariamente desativado para garantir estabilidade. Use texto ou GPS."
+          "⚠️ Processamento de áudio temporariamente desativado. Use texto ou GPS."
       )
       return
 
@@ -256,29 +296,14 @@ async def processar_mensagem(
 
     # --- 1. SE FOR CADASTRO ---
     if texto_lower.startswith("cadastrar"):
-      # Remove a palavra 'cadastrar' do começo e divide por barra vertical (|)
-      conteudo = texto_entrada[9:].strip()
-      partes = [p.strip() for p in conteudo.split("|")]
-
-      if len(partes) >= 3:
-        bairro = partes[0]
-        rua = partes[1]
-        try:
-          risco = int("".join(filter(str.isdigit, partes[2])))
-        except ValueError:
-          risco = 2
-        detalhes = partes[3] if len(partes) > 3 else "Cadastrado via texto"
-      else:
-        # Fallback se o usuário não usar barras, tenta interpretar de forma simples
-        bairro = "Grama"
-        rua = conteudo if conteudo else "Via Geral"
-        risco = 2
-        detalhes = conteudo
+      bairro, rua, risco, horario, detalhes = extrair_dados_cadastro_com_groq(
+          texto_entrada
+      )
 
       cursor.execute(
           "INSERT INTO alertas (bairro, rua, risco, horario_critico, detalhes)"
           " VALUES (?, ?, ?, ?, ?)",
-          (bairro, rua, risco, "Recente", detalhes),
+          (bairro, rua, risco, horario, detalhes),
       )
       conn.commit()
       conn.close()
@@ -288,13 +313,13 @@ async def processar_mensagem(
           f"📍 *Bairro:* {bairro}\n"
           f"🛣️ *Rua:* {rua}\n"
           f"⚠ *Risco:* Nível {risco}\n"
+          f"⏰ *Horário:* {horario}\n"
           f"📝 *Detalhes:* {detalhes}",
           parse_mode="Markdown",
       )
 
     # --- 2. SE FOR CONSULTA ---
     else:
-      # Remove a palavra 'consultar' se houver
       termo_busca = (
           texto_lower.replace("consultar", "")
           .replace("pesquisar", "")
@@ -352,7 +377,7 @@ def rodar_bot():
   if not telegram_token:
     return
 
-  while True:
+  while Time:
     try:
       loop = asyncio.new_event_loop()
       asyncio.set_event_loop(loop)
