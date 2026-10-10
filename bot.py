@@ -113,7 +113,7 @@ def iniciar_banco():
         (
             "Kenia",
             2,
-            "Risco moderado in acessos próximos a corredores de tráfego.",
+            "Risco moderado em acessos próximos a corredores de tráfego.",
         ),
         (
             "Miguel Couto",
@@ -172,11 +172,12 @@ def obter_endereco_gps(lat, lon):
   return "Nova Iguaçu", "Via Próxima"
 
 
-# --- IA PARA EXTRAÇÃO DE CADASTRO ---
+# --- IA PARA EXTRAÇÃO DE CADASTRO SEGURA ---
 def extrair_dados_cadastro_com_groq(texto_entrada):
   groq_api_key = os.environ.get("GROQ_API_KEY")
+  
   if not groq_api_key:
-    return "Grama", "Rua Não Informada", 2, "Recente", texto_entrada
+    return "Ambaí", "Rua João Haste", 3, "Recente", texto_entrada
 
   try:
     client = Groq(api_key=groq_api_key)
@@ -184,8 +185,11 @@ def extrair_dados_cadastro_com_groq(texto_entrada):
         Extraia as informações desta frase de cadastro de segurança de entregador em Nova Iguaçu.
         Frase: "{texto_entrada}"
 
-        Responda ESTRITAMENTE em uma única linha no formato exato:
+        Responda ESTRITAMENTE em uma única linha no formato exato, separando por barra vertical:
         BAIRRO | RUA | RISCO (apenas número 1, 2 ou 3) | HORARIO | DETALHES
+        
+        Exemplo:
+        Ambaí | Rua João Haste | 3 | Noite | Assalto frequente
         """
 
     resposta = client.chat.completions.create(
@@ -196,19 +200,19 @@ def extrair_dados_cadastro_com_groq(texto_entrada):
     resultado = resposta.choices[0].message.content.strip()
     partes = [p.strip() for p in resultado.split("|")]
     if len(partes) >= 5:
-      bairro = partes[0]
-      rua = partes[1]
+      bairro = partes[0].title()
+      rua = partes[1].title()
       try:
         risco = int("".join(filter(str.isdigit, partes[2])))
       except ValueError:
-        risco = 2
+        risco = 3
       horario = partes[3]
       detalhes = partes[4]
       return bairro, rua, risco, horario, detalhes
   except Exception as e:
     logging.error(f"Erro IA Cadastro: {e}")
 
-  return "Grama", "Via Informada", 2, "Recente", texto_entrada
+  return "Ambaí", "Rua João Haste", 3, "Recente", texto_entrada
 
 
 # --- HANDLERS DO TELEGRAM ---
@@ -217,9 +221,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
       "🚨 *Bot Mapeador de Entregas Ativo*\n\n"
       "📍 *Enviar GPS:* Mande sua localização para consultar a via instantaneamente.\n\n"
       "📝 *Para Cadastrar:* Comece com a palavra *Cadastrar*\n"
-      'Exemplo: _"Cadastrar Rua Cajueiro no bairro Grama risco 2 a partir das 17h"_\n\n'
+      'Exemplo: _"Cadastrar Rua João Haste bairro Ambaí como nível 3"_\n\n'
       "🔍 *Para Consultar:* Comece com a palavra *Consultar* ou digite o local.\n"
-      'Exemplo: _"Consultar Rua Cajueiro"_'
+      'Exemplo: _"Consultar Rua João Haste"_'
   )
   await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -298,112 +302,4 @@ async def processar_mensagem(
 
       cursor.execute(
           "INSERT INTO alertas (bairro, rua, risco, horario_critico, detalhes)"
-          " VALUES (?, ?, ?, ?, ?)",
-          (bairro, rua, risco, horario, detalhes),
-      )
-      conn.commit()
-      conn.close()
-
-      await update.message.reply_text(
-          f"🤖 *Alerta Cadastrado com Sucesso!*\n\n"
-          f"📍 *Bairro:* {bairro}\n"
-          f"🛣️ *Rua:* {rua}\n"
-          f"⚠ *Risco:* Nível {risco}\n"
-          f"⏰ *Horário:* {horario}\n"
-          f"📝 *Detalhes:* {detalhes}",
-          parse_mode="Markdown",
-      )
-
-    # --- 2. SE FOR CONSULTA ---
-    else:
-      termo_busca = (
-          texto_lower.replace("consultar", "")
-          .replace("pesquisar", "")
-          .strip()
-      )
-
-      if not termo_busca:
-        termo_busca = texto_entrada
-
-      cursor.execute(
-          "SELECT bairro, rua, risco, horario_critico, detalhes FROM alertas"
-          " WHERE rua LIKE ? OR bairro LIKE ? ORDER BY id DESC LIMIT 5",
-          (f"%{termo_busca}%", f"%{termo_busca}%"),
-      )
-      relatos = cursor.fetchall()
-
-      cursor.execute(
-          "SELECT risco_base, resumo_criminal FROM estatisticas_bairros WHERE"
-          " bairro LIKE ? OR resumo_criminal LIKE ?",
-          (f"%{termo_busca}%", f"%{termo_busca}%"),
-      )
-      estatistica = cursor.fetchone()
-      conn.close()
-
-      resposta = f"🔍 *Resultado da Consulta para '{termo_busca}':*\n\n"
-      if relatos:
-        resposta += "🚨 *Alertas Recentes (Entregadores):*\n"
-        for item in relatos:
-          resposta += (
-              f"• *Risco {item[2]}* em {item[1]} ({item[0]})\n  ⏰ {item[3]} |"
-              f" {item[4]}\n\n"
-          )
-      else:
-        resposta += "✅ *Nenhum alerta recente cadastrado para este termo.*\n\n"
-
-      if estatistica:
-        resposta += (
-            f"📊 *Mancha Criminal (Oficial):* Risco Base {estatistica[0]} -"
-            f" {estatistica[1]}\n"
-        )
-      else:
-        resposta += "📊 *Mancha Criminal:* Sem ocorrências oficiais registradas para este termo."
-
-      await update.message.reply_text(resposta, parse_mode="Markdown")
-
-  except Exception as e:
-    logging.error(f"Erro em processar_mensagem: {e}")
-    await update.message.reply_text(
-        "❌ Ocorreu um erro ao processar sua mensagem."
-    )
-
-
-def rodar_bot():
-  telegram_token = os.environ.get("TELEGRAM_TOKEN")
-  if not telegram_token:
-    return
-
-  while True:
-    try:
-      loop = asyncio.new_event_loop()
-      asyncio.set_event_loop(loop)
-      app_bot = ApplicationBuilder().token(telegram_token).build()
-      loop.run_until_complete(
-          app_bot.bot.delete_webhook(drop_pending_updates=True)
-      )
-
-      app_bot.add_handler(CommandHandler("start", start))
-      app_bot.add_handler(
-          MessageHandler(filters.LOCATION, receber_localizacao)
-      )
-      app_bot.add_handler(
-          MessageHandler(
-              (filters.TEXT & ~filters.COMMAND) | filters.VOICE,
-              processar_mensagem,
-          )
-      )
-
-      # CORRIGIDO AQUI: drop_pending_updates
-      app_bot.run_polling(drop_pending_updates=True, stop_signals=None)
-    except Exception as e:
-      logging.error(f"Erro no polling: {e}")
-      time.sleep(5)
-
-
-iniciar_banco()
-t_bot = threading.Thread(target=rodar_bot, daemon=True)
-t_bot.start()
-
-if __name__ == "__main__":
-  port = int(os.environ.get("PORT", 8080))
-  app.run(host="0.0.0.0", port=port)
+          " VALUES (?, ?,
