@@ -2,4 +2,3 @@ Flask
 groq
 requests
 python-telegram-bot
-edge-tts
