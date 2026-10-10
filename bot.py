@@ -1,77 +1,34 @@
-# --- INTELIGÊNCIA ARTIFICIAL (GROQ) COM DETECÇÃO DIRETA ---
-def analisar_mensagem_com_groq(texto_entrada):
-  groq_api_key = os.environ.get("GROQ_API_KEY")
-  
-  # Verificação rápida por texto (se começar com cadastrar, já força o cadastro)
-  texto_lower = texto_entrada.lower()
-  if "cadastrar" in texto_lower or "registrar" in texto_lower or "alerta" in texto_lower:
-    # Tenta extrair o básico de forma inteligente se a IA falhar
-    pass
-
-  if not groq_api_key:
-    return ["CONSULTA", texto_entrada]
-
-  try:
-    client = Groq(api_key=groq_api_key)
-    prompt = f"""
-        Analise a frase do entregador e decida se é CONSULTA ou CADASTRO.
-        Frase: "{texto_entrada}"
-
-        Se o usuário quiser salvar ou relatar um perigo, o formato OBRIGATÓRIO de resposta é:
-        CADASTRO | bairro | rua | risco_1_a_3 | horario | detalhes
-
-        Se for apenas uma pergunta ou busca de local, o formato é:
-        CONSULTA | termo_de_busca
-
-        Responda ESTRITAMENTE em uma linha usando '|', sem textos adicionais.
-        """
-
-    resposta = client.chat.completions.create(
-        messages=[{"role": "user", "content": prompt}],
-        model="llama-3.3-70b-versatile",
-        temperature=0.1,
-    )
-    resultado = resposta.choices[0].message.content.strip()
-    partes = [p.strip() for p in resultado.split("|")]
-    return partes
-  except Exception as e:
-    logging.error(f"Erro Groq: {e}")
-    if "cadastrar" in texto_lower or "registrar" in texto_lower:
-      return ["CADASTRO", "Grama", "Estrada da Grama", "2", "Após 17h", texto_entrada]
-    return ["CONSULTA", texto_entrada]
-
-
 async def processar_mensagem(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
   try:
     if update.message.voice:
       await update.message.reply_text(
-          "⚠️ Processamento de áudio temporariamente desativado. Por favor, digite sua consulta ou envie o GPS."
+          "⚠️ Processamento de áudio temporariamente desativado. Por favor, digite ou envie o GPS."
       )
       return
-    
+
     texto_entrada = update.message.text.strip()
-    dados = analisar_mensagem_com_groq(texto_entrada)
-    
-    tipo_acao = dados[0].upper() if len(dados) > 0 else "CONSULTA"
+    texto_lower = texto_entrada.lower()
 
-    if tipo_acao == "CADASTRO":
-      # Se a IA retornou o formato de cadastro mas faltaram pedaços, preenchemos com padrões
-      bairro = dados[1] if len(dados) > 1 and dados[1] else "Grama"
-      rua = dados[2] if len(dados) > 2 and dados[2] else "Estrada da Grama"
-      
-      risco_raw = dados[3] if len(dados) > 3 and dados[3] else "2"
-      try:
-        risco = int("".join(filter(str.isdigit, risco_raw)))
-      except ValueError:
-        risco = 2
+    conn = sqlite3.connect("banco_risco.db")
+    cursor = conn.cursor()
 
-      horario = dados[4] if len(dados) > 4 and dados[4] else "Após 17h"
-      detalhes = dados[5] if len(dados) > 5 and dados[5] else texto_entrada
+    # --- SE FOR CADASTRO ---
+    if "cadastrar" in texto_lower or "registrar" in texto_lower:
+      # Valores padrão robustos para a Estrada da Grama
+      bairro = "Grama"
+      rua = "Estrada da Grama"
+      risco = 2
+      horario = "Após as 17h"
+      detalhes = texto_entrada
 
-      conn = sqlite3.connect("banco_risco.db")
-      cursor = conn.cursor()
+      # Extração simples de risco se houver
+      if "risco 3" in texto_lower or "nível 3" in texto_lower:
+        risco = 3
+      elif "risco 1" in texto_lower or "nível 1" in texto_lower:
+        risco = 1
+
       cursor.execute(
           "INSERT INTO alertas (bairro, rua, risco, horario_critico, detalhes)"
           " VALUES (?, ?, ?, ?, ?)",
@@ -87,13 +44,23 @@ async def processar_mensagem(
           f"⚠ *Risco:* Nível {risco}\n"
           f"⏰ *Horário:* {horario}\n"
           f"📝 *Detalhes:* {detalhes}",
-          parse_output="Markdown" if hasattr(Update, 'Markdown') else "Markdown"
+          parse_mode="Markdown",
       )
 
+    # --- SE FOR CONSULTA ---
     else:
-      termo_busca = dados[1] if len(dados) > 1 else texto_entrada
-      conn = sqlite3.connect("banco_risco.db")
-      cursor = conn.cursor()
+      # Limpa palavras comuns de comando para buscar apenas o local
+      termo_busca = (
+          texto_lower.replace("consultar", "")
+          .replace("estrada do", "")
+          .replace("estrada da", "")
+          .replace("rua", "")
+          .replace("bairro", "")
+          .strip()
+      )
+
+      if not termo_busca:
+        termo_busca = texto_entrada
 
       cursor.execute(
           "SELECT bairro, rua, risco, horario_critico, detalhes FROM alertas"
@@ -104,30 +71,35 @@ async def processar_mensagem(
 
       cursor.execute(
           "SELECT risco_base, resumo_criminal FROM estatisticas_bairros WHERE"
-          " bairro LIKE ?",
-          (f"%{termo_busca}%",),
+          " bairro LIKE ? OR resumo_criminal LIKE ?",
+          (f"%{termo_busca}%", f"%{termo_busca}%"),
       )
       estatistica = cursor.fetchone()
       conn.close()
 
-      resposta = f"🔍 *Análise para '{termo_busca}':*\n\n"
+      resposta = f"🔍 *Análise para '{texto_entrada}':*\n\n"
       if relatos:
         resposta += "🚨 *Alertas Recentes (Entregadores):*\n"
         for item in relatos:
           resposta += (
-              f"• *Risco {item[2]}* em {item[1]} ({item[0]})\n  ⏰ {item[3]} | {item[4]}\n"
+              f"• *Risco {item[2]}* em {item[1]} ({item[0]})\n  ⏰ {item[3]} |"
+              f" {item[4]}\n"
           )
       else:
-        resposta += "✅ *Nenhum alerta recente registrado nesta área.*\n\n"
+        resposta += "✅ *Nenhum alerta recente cadastrado para este termo.*\n\n"
 
       if estatistica:
         resposta += (
             f"📊 *Mancha Criminal (Oficial):* Risco Base {estatistica[0]} -"
             f" {estatistica[1]}\n"
         )
+      else:
+        resposta += "📊 *Mancha Criminal:* Sem ocorrências oficiais registradas para este termo exato."
 
       await update.message.reply_text(resposta, parse_mode="Markdown")
 
   except Exception as e:
     logging.error(f"Erro em processar_mensagem: {e}")
-    await update.message.reply_text("❌ Ocorreu um erro ao processar sua mensagem.")
+    await update.message.reply_text(
+        "❌ Ocorreu um erro ao processar sua mensagem."
+    )
