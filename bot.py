@@ -143,7 +143,7 @@ def iniciar_banco():
     logging.error(f"Erro no banco: {e}")
 
 
-# --- GEOLOCALIZAÇÃO ROBUSTA ---
+# --- GEOLOCALIZAÇÃO ROBUSTA MELHORADA ---
 def obter_endereco_gps(lat, lon):
   try:
     url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=18&addressdetails=1"
@@ -152,15 +152,20 @@ def obter_endereco_gps(lat, lon):
 
     if res.status_code == 200:
       dados = res.json().get("address", {})
+      
       rua = (
           dados.get("road")
           or dados.get("pedestrian")
           or dados.get("footway")
+          or dados.get("path")
+          or dados.get("suburb")
           or "Via Próxima"
       )
+      
       bairro = (
           dados.get("suburb")
           or dados.get("neighbourhood")
+          or dados.get("residential")
           or dados.get("quarter")
           or dados.get("city_district")
           or dados.get("town")
@@ -302,4 +307,111 @@ async def processar_mensagem(
 
       cursor.execute(
           "INSERT INTO alertas (bairro, rua, risco, horario_critico, detalhes)"
-          " VALUES (?, ?,
+          " VALUES (?, ?, ?, ?, ?)",
+          (bairro, rua, risco, horario, detalhes),
+      )
+      conn.commit()
+      conn.close()
+
+      await update.message.reply_text(
+          f"🤖 *Alerta Cadastrado com Sucesso!*\n\n"
+          f"📍 *Bairro:* {bairro}\n"
+          f"🛣️ *Rua:* {rua}\n"
+          f"⚠ *Risco:* Nível {risco}\n"
+          f"⏰ *Horário:* {horario}\n"
+          f"📝 *Detalhes:* {detalhes}",
+          parse_mode="Markdown",
+      )
+
+    # --- 2. SE FOR CONSULTA ---
+    else:
+      termo_busca = (
+          texto_lower.replace("consultar", "")
+          .replace("pesquisar", "")
+          .strip()
+      )
+
+      if not termo_busca:
+        termo_busca = texto_entrada
+
+      cursor.execute(
+          "SELECT bairro, rua, risco, horario_critico, detalhes FROM alertas"
+          " WHERE rua LIKE ? OR bairro LIKE ? ORDER BY id DESC LIMIT 5",
+          (f"%{termo_busca}%", f"%{termo_busca}%"),
+      )
+      relatos = cursor.fetchall()
+
+      cursor.execute(
+          "SELECT risco_base, resumo_criminal FROM estatisticas_bairros WHERE"
+          " bairro LIKE ? OR resumo_criminal LIKE ?",
+          (f"%{termo_busca}%", f"%{termo_busca}%"),
+      )
+      estatistica = cursor.fetchone()
+      conn.close()
+
+      resposta = f"🔍 *Resultado da Consulta para '{termo_busca}':*\n\n"
+      if relatos:
+        resposta += "🚨 *Alertas Recentes (Entregadores):*\n"
+        for item in relatos:
+          resposta += (
+              f"• *Risco {item[2]}* em {item[1]} ({item[0]})\n  ⏰ {item[3]} |"
+              f" {item[4]}\n\n"
+          )
+      else:
+        resposta += "✅ *Nenhum alerta recente cadastrado para este termo.*\n\n"
+
+      if estatistica:
+        resposta += (
+            f"📊 *Mancha Criminal (Oficial):* Risco Base {estatistica[0]} -"
+            f" {estatistica[1]}\n"
+        )
+      else:
+        resposta += "📊 *Mancha Criminal:* Sem ocorrências oficiais registradas para este termo."
+
+      await update.message.reply_text(resposta, parse_mode="Markdown")
+
+  except Exception as e:
+    logging.error(f"Erro em processar_mensagem: {e}")
+    await update.message.reply_text(
+        "❌ Ocorreu um erro ao processar sua mensagem."
+    )
+
+
+def rodar_bot():
+  telegram_token = os.environ.get("TELEGRAM_TOKEN")
+  if not telegram_token:
+    return
+
+  while True:
+    try:
+      loop = asyncio.new_event_loop()
+      asyncio.set_event_loop(loop)
+      app_bot = ApplicationBuilder().token(telegram_token).build()
+      loop.run_until_complete(
+          app_bot.bot.delete_webhook(drop_pending_updates=True)
+      )
+
+      app_bot.add_handler(CommandHandler("start", start))
+      app_bot.add_handler(
+          MessageHandler(filters.LOCATION, receber_localizacao)
+      )
+      app_bot.add_handler(
+          MessageHandler(
+              (filters.TEXT & ~filters.COMMAND) | filters.VOICE,
+              processar_mensagem,
+          )
+      )
+
+      app_bot.run_polling(drop_pending_updates=True, stop_signals=None)
+    except Exception as e:
+      logging.error(f"Erro no polling: {e}")
+      time.sleep(5)
+
+
+iniciar_banco()
+t_bot = threading.Thread(target=rodar_bot, daemon=True)
+t_bot.start()
+
+if __name__ == "__main__":
+  port = int(os.environ.get("PORT", 8080))
+  app.run(host="0.0.0.0", port=port)
