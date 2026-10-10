@@ -113,7 +113,7 @@ def iniciar_banco():
         (
             "Kenia",
             2,
-            "Risco moderado em acessos próximos a corredores de tráfego.",
+            "Risco moderado in acessos próximos a corredores de tráfego.",
         ),
         (
             "Miguel Couto",
@@ -393,7 +393,8 @@ def rodar_bot():
           )
       )
 
-      app_bot.run_polling(drop_polling_updates=True, stop_signals=None)
+      # CORRIGIDO AQUI: drop_pending_updates
+      app_bot.run_polling(drop_pending_updates=True, stop_signals=None)
     except Exception as e:
       logging.error(f"Erro no polling: {e}")
       time.sleep(5)
